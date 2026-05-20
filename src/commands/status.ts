@@ -20,16 +20,12 @@ function tokenSum(items: { tokenCount: number }[]): number {
 	return items.reduce((sum, item) => sum + item.tokenCount, 0);
 }
 
-type StatusTheme = {
-	fg(color: "toolDiffAdded" | "toolDiffRemoved", text: string): string;
-};
-
-function addedSuffix(theme: StatusTheme, count: number): string | undefined {
-	return count > 0 ? theme.fg("toolDiffAdded", `+${count.toLocaleString()}`) : undefined;
+function addedSuffix(count: number): string | undefined {
+	return count > 0 ? `+${count.toLocaleString()}` : undefined;
 }
 
-function removedSuffix(theme: StatusTheme, count: number): string | undefined {
-	return count > 0 ? theme.fg("toolDiffRemoved", `-${count.toLocaleString()}`) : undefined;
+function removedSuffix(count: number): string | undefined {
+	return count > 0 ? `-${count.toLocaleString()}` : undefined;
 }
 
 function appendSuffixes(line: string, suffixes: (string | undefined)[]): string {
@@ -53,13 +49,13 @@ export function registerStatusCommand(pi: ExtensionAPI, runtime: Runtime): void 
 			const observationLine = appendSuffixes(
 				`Observations: ${folded.observations.length} recorded / ${folded.droppedObservationIds.size} dropped / ${visible.observations.length} visible`,
 				[
-					addedSuffix(ctx.ui.theme, drift.observationsOnlyInFull.length),
-					removedSuffix(ctx.ui.theme, drift.droppedOnlyInFull.length),
+					addedSuffix(drift.observationsOnlyInFull.length),
+					removedSuffix(drift.droppedOnlyInFull.length),
 				],
 			);
 			const reflectionLine = appendSuffixes(
 				`Reflections:  ${folded.reflections.length} recorded / ${visible.reflections.length} visible`,
-				[addedSuffix(ctx.ui.theme, drift.reflectionsOnlyInFull.length)],
+				[addedSuffix(drift.reflectionsOnlyInFull.length)],
 			);
 			const obsProgress = rawTokensSinceObservationCoverage(entries);
 			const reflectionProgress = rawTokensSinceReflectionCoverage(entries);

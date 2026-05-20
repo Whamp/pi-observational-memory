@@ -43,13 +43,12 @@ function setup(args: { entries: TestEntry[]; runtime?: Partial<any> }) {
 	registerStatusCommand(pi as any, runtime as any);
 	if (!handler) throw new Error("status handler not registered");
 	const notify = vi.fn();
-	const theme = { fg: vi.fn((color: string, text: string) => `<${color}>${text}</${color}>`) };
-	const ctx = { cwd: "/tmp/project", ui: { notify, theme }, sessionManager: { getBranch: () => args.entries } };
+	const ctx = { cwd: "/tmp/project", ui: { notify }, sessionManager: { getBranch: () => args.entries } };
 	const run = async () => {
 		await handler!(undefined, ctx);
 		return notify.mock.calls.at(-1)?.[0] as string;
 	};
-	return { run, notify, theme };
+	return { run, notify };
 }
 
 describe("V3 /om-status", () => {
@@ -83,8 +82,8 @@ describe("V3 /om-status", () => {
 
 		const output = await setup({ entries }).run();
 
-		expect(output).toContain("Observations: 2 recorded / 1 dropped / 1 visible <toolDiffAdded>+1</toolDiffAdded> <toolDiffRemoved>-1</toolDiffRemoved>");
-		expect(output).toContain("Reflections:  1 recorded / 0 visible <toolDiffAdded>+1</toolDiffAdded>");
+		expect(output).toContain("Observations: 2 recorded / 1 dropped / 1 visible +1 -1");
+		expect(output).toContain("Reflections:  1 recorded / 0 visible +1");
 		expect(output).not.toContain("Visible:");
 		expect(output).not.toContain("Drift:");
 		expect(output).not.toContain("full truth");
