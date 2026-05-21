@@ -85,18 +85,21 @@ export function registerStatusCommand(pi: ExtensionAPI, runtime: Runtime): void 
 				`Reflection pool:  ~${visibleReflectionTokens.toLocaleString()} tokens`,
 			];
 
-			if (runtime.observerInFlight || runtime.reflectDropInFlight || runtime.compactInFlight || runtime.compactHookInFlight) {
+			if (runtime.consolidationInFlight || runtime.compactInFlight || runtime.compactHookInFlight) {
 				lines.push("", "── In flight ──");
-				if (runtime.observerInFlight) lines.push("Observer: running");
-				if (runtime.reflectDropInFlight) lines.push("Reflect/drop: running");
+				if (runtime.consolidationInFlight) {
+					const phase = runtime.consolidationPhase ? ` (${runtime.consolidationPhase})` : "";
+					lines.push(`Consolidation: running${phase}`);
+				}
 				if (runtime.compactInFlight) lines.push("Auto-compaction: running");
 				if (runtime.compactHookInFlight) lines.push("Compaction hook: running");
 			}
 
-			if (runtime.lastObserverError || runtime.lastReflectDropError) {
+			if (runtime.lastObserverError || runtime.lastReflectorError || runtime.lastDropperError) {
 				lines.push("", "── Last error ──");
 				if (runtime.lastObserverError) lines.push(`Observer: ${runtime.lastObserverError}`);
-				if (runtime.lastReflectDropError) lines.push(`Reflect/drop: ${runtime.lastReflectDropError}`);
+				if (runtime.lastReflectorError) lines.push(`Reflector: ${runtime.lastReflectorError}`);
+				if (runtime.lastDropperError) lines.push(`Dropper: ${runtime.lastDropperError}`);
 			}
 
 			ctx.ui.notify(lines.join("\n"), "info");

@@ -52,39 +52,49 @@ describe("Runtime V3 behavior", () => {
 		});
 	});
 
-	it("tracks observer task state and captures errors", async () => {
+	it("tracks consolidation task state", async () => {
 		const runtime = new Runtime();
-		const notify = vi.fn();
-		const promise = runtime.launchObserverTask({ hasUI: true, ui: { notify } }, "observer", async () => {
-			throw new Error("boom");
+		let release: (() => void) | undefined;
+		const work = new Promise<void>((resolve) => {
+			release = resolve;
 		});
 
-		expect(runtime.observerInFlight).toBe(true);
-		expect(runtime.observerPromise).toBe(promise);
+		const promise = runtime.launchConsolidationTask({ hasUI: false }, async () => {
+			runtime.consolidationPhase = "observer";
+			await work;
+		});
+
+		expect(runtime.consolidationInFlight).toBe(true);
+		expect(runtime.consolidationPromise).toBe(promise);
+		expect(runtime.consolidationPhase).toBe("observer");
+		release?.();
 		await promise;
-		expect(runtime.observerInFlight).toBe(false);
-		expect(runtime.observerPromise).toBeNull();
-		expect(runtime.lastObserverError).toBe("boom");
-		expect(notify).toHaveBeenCalledWith("Observational memory: observer failed: boom", "warning");
+		expect(runtime.consolidationInFlight).toBe(false);
+		expect(runtime.consolidationPromise).toBeNull();
+		expect(runtime.consolidationPhase).toBeUndefined();
 	});
 
-	it("tracks reflect/drop task state independently", async () => {
+	it("records stage-specific consolidation errors", () => {
 		const runtime = new Runtime();
-		const promise = runtime.launchReflectDropTask({ hasUI: false }, "reflect/drop", async () => {});
+		const notify = vi.fn();
 
-		expect(runtime.reflectDropInFlight).toBe(true);
-		expect(runtime.reflectDropPromise).toBe(promise);
-		await promise;
-		expect(runtime.reflectDropInFlight).toBe(false);
-		expect(runtime.reflectDropPromise).toBeNull();
-		expect(runtime.lastReflectDropError).toBeUndefined();
+		expect(runtime.recordConsolidationStageError({ hasUI: true, ui: { notify } }, "observer", new Error("observe failed"))).toBe("observe failed");
+		expect(runtime.recordConsolidationStageError({ hasUI: true, ui: { notify } }, "reflector", new Error("reflect failed"))).toBe("reflect failed");
+		expect(runtime.recordConsolidationStageError({ hasUI: true, ui: { notify } }, "dropper", "drop failed")).toBe("drop failed");
+
+		expect(runtime.lastObserverError).toBe("observe failed");
+		expect(runtime.lastReflectorError).toBe("reflect failed");
+		expect(runtime.lastDropperError).toBe("drop failed");
+		expect(notify).toHaveBeenCalledWith("Observational memory: observer failed: observe failed", "warning");
+		expect(notify).toHaveBeenCalledWith("Observational memory: reflector failed: reflect failed", "warning");
+		expect(notify).toHaveBeenCalledWith("Observational memory: dropper failed: drop failed", "warning");
 	});
 
 	it("keeps compaction flags independent", () => {
 		const runtime = new Runtime();
 		runtime.compactInFlight = true;
 		runtime.compactHookInFlight = true;
-		expect(runtime.observerInFlight).toBe(false);
-		expect(runtime.reflectDropInFlight).toBe(false);
+		expect(runtime.consolidationInFlight).toBe(false);
+		expect(runtime.consolidationPhase).toBeUndefined();
 	});
 });

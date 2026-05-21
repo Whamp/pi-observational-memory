@@ -32,12 +32,13 @@ function setup(args: { entries: TestEntry[]; runtime?: Partial<any> }) {
 			observationsPoolMaxTokens: 40,
 			passive: false,
 		},
-		observerInFlight: false,
-		reflectDropInFlight: false,
+		consolidationInFlight: false,
+		consolidationPhase: undefined,
 		compactInFlight: false,
 		compactHookInFlight: false,
 		lastObserverError: undefined,
-		lastReflectDropError: undefined,
+		lastReflectorError: undefined,
+		lastDropperError: undefined,
 		...args.runtime,
 	};
 	registerStatusCommand(pi as any, runtime as any);
@@ -118,26 +119,36 @@ describe("V3 /om-status", () => {
 		expect(output).not.toContain("visible observation tokens");
 	});
 
-	it("shows passive mode, workers in flight, and last errors", async () => {
+	it("shows passive mode, consolidation in flight, compaction in flight, and stage-specific last errors", async () => {
 		const output = await setup({
 			entries: [],
 			runtime: {
 				config: { observeAfterTokens: 10, reflectAfterTokens: 20, compactAfterTokens: 30, observationsPoolMaxTokens: 40, passive: true },
-				observerInFlight: true,
-				reflectDropInFlight: true,
+				consolidationInFlight: true,
+				consolidationPhase: "reflector",
 				compactInFlight: true,
 				compactHookInFlight: true,
 				lastObserverError: "observer failed",
-				lastReflectDropError: "drop failed",
+				lastReflectorError: "reflect failed",
+				lastDropperError: "drop failed",
 			},
 		}).run();
 
 		expect(output).toContain("Passive: automatic memory workers and auto-compaction disabled");
-		expect(output).toContain("Observer: running");
-		expect(output).toContain("Reflect/drop: running");
+		expect(output).toContain("Consolidation: running (reflector)");
+		expect(output).not.toContain("Observer: running");
+		expect(output).not.toContain("Reflect/drop: running");
 		expect(output).toContain("Auto-compaction: running");
 		expect(output).toContain("Compaction hook: running");
 		expect(output).toContain("Observer: observer failed");
-		expect(output).toContain("Reflect/drop: drop failed");
+		expect(output).toContain("Reflector: reflect failed");
+		expect(output).toContain("Dropper: drop failed");
+	});
+
+	it("shows consolidation in flight without phase when phase is unavailable", async () => {
+		const output = await setup({ entries: [], runtime: { consolidationInFlight: true } }).run();
+
+		expect(output).toContain("Consolidation: running");
+		expect(output).not.toContain("Consolidation: running (");
 	});
 });

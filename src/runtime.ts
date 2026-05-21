@@ -6,6 +6,7 @@ export type ResolveResult =
 
 type NotifyLevel = "warning" | "info" | "error";
 type Notify = (message: string, type?: NotifyLevel) => void;
+export type ConsolidationPhase = "observer" | "reflector" | "dropper";
 
 export interface ResolveCtx {
 	model: unknown;
@@ -22,15 +23,15 @@ export interface LaunchCtx {
 export class Runtime {
 	config: Config = { ...DEFAULTS };
 	configLoaded = false;
-	observerInFlight = false;
-	observerPromise: Promise<void> | null = null;
-	reflectDropInFlight = false;
-	reflectDropPromise: Promise<void> | null = null;
+	consolidationInFlight = false;
+	consolidationPromise: Promise<void> | null = null;
+	consolidationPhase: ConsolidationPhase | undefined;
 	compactInFlight = false;
 	compactHookInFlight = false;
 	resolveFailureNotified = false;
 	lastObserverError: string | undefined;
-	lastReflectDropError: string | undefined;
+	lastReflectorError: string | undefined;
+	lastDropperError: string | undefined;
 
 	ensureConfig(cwd: string): void {
 		if (this.configLoaded) return;
@@ -60,28 +61,28 @@ export class Runtime {
 		return { ok: true, model, apiKey: auth.apiKey as string, headers: auth.headers as Record<string, string> | undefined };
 	}
 
-	launchObserverTask(ctx: LaunchCtx, label: string, work: () => Promise<void>): Promise<void> {
-		this.observerInFlight = true;
+	launchConsolidationTask(ctx: LaunchCtx, work: () => Promise<void>): Promise<void> {
+		this.consolidationInFlight = true;
+		this.consolidationPhase = undefined;
 		this.lastObserverError = undefined;
-		const promise = this.launchTrackedTask(ctx, label, work, (error) => {
-			this.lastObserverError = error;
-			this.observerInFlight = false;
-			if (this.observerPromise === promise) this.observerPromise = null;
+		this.lastReflectorError = undefined;
+		this.lastDropperError = undefined;
+		const promise = this.launchTrackedTask(ctx, "consolidation", work, () => {
+			this.consolidationInFlight = false;
+			this.consolidationPhase = undefined;
+			if (this.consolidationPromise === promise) this.consolidationPromise = null;
 		});
-		this.observerPromise = promise;
+		this.consolidationPromise = promise;
 		return promise;
 	}
 
-	launchReflectDropTask(ctx: LaunchCtx, label: string, work: () => Promise<void>): Promise<void> {
-		this.reflectDropInFlight = true;
-		this.lastReflectDropError = undefined;
-		const promise = this.launchTrackedTask(ctx, label, work, (error) => {
-			this.lastReflectDropError = error;
-			this.reflectDropInFlight = false;
-			if (this.reflectDropPromise === promise) this.reflectDropPromise = null;
-		});
-		this.reflectDropPromise = promise;
-		return promise;
+	recordConsolidationStageError(ctx: LaunchCtx, phase: ConsolidationPhase, error: unknown): string {
+		const message = error instanceof Error ? error.message : String(error);
+		if (phase === "observer") this.lastObserverError = message;
+		if (phase === "reflector") this.lastReflectorError = message;
+		if (phase === "dropper") this.lastDropperError = message;
+		if (ctx.hasUI && ctx.ui) ctx.ui.notify(`Observational memory: ${phase} failed: ${message}`, "warning");
+		return message;
 	}
 
 	private launchTrackedTask(
