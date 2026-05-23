@@ -94,28 +94,34 @@ function makeModelResolver(runtime: Runtime, ctx: ConsolidationCtx): (stage: "ob
 }
 
 export function registerConsolidationTrigger(pi: ExtensionAPI, runtime: Runtime): void {
-	pi.on("turn_end", (_event, ctx) => {
-		runtime.ensureConfig(ctx.cwd);
-		if (runtime.config.passive === true) return;
-		if (runtime.consolidationInFlight) return;
+	const launch = (_event: unknown, ctx: ConsolidationCtx) => {
+		maybeLaunchConsolidation(pi, runtime, ctx);
+	};
+	pi.on("agent_start", launch);
+	pi.on("turn_end", launch);
+}
 
-		const entries = ctx.sessionManager.getBranch() as Entry[];
-		if (!anyStageDue(entries, runtime)) return;
+function maybeLaunchConsolidation(pi: ExtensionAPI, runtime: Runtime, ctx: ConsolidationCtx): void {
+	runtime.ensureConfig(ctx.cwd);
+	if (runtime.config.passive === true) return;
+	if (runtime.consolidationInFlight) return;
 
-		const runId = `consolidation-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`;
-		const consolidationCtx: ConsolidationCtx = {
-			cwd: ctx.cwd,
-			hasUI: ctx.hasUI,
-			ui: ctx.ui,
-			model: ctx.model,
-			modelRegistry: ctx.modelRegistry,
-			sessionManager: ctx.sessionManager,
-		};
+	const entries = ctx.sessionManager.getBranch() as Entry[];
+	if (!anyStageDue(entries, runtime)) return;
 
-		void runtime.launchConsolidationTask(ctx, async () => withDebugLogContext({ enabled: runtime.config.debugLog === true, cwd: ctx.cwd, runId }, async () => {
-			await runConsolidationPipeline(pi, runtime, consolidationCtx);
-		}));
-	});
+	const runId = `consolidation-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`;
+	const consolidationCtx: ConsolidationCtx = {
+		cwd: ctx.cwd,
+		hasUI: ctx.hasUI,
+		ui: ctx.ui,
+		model: ctx.model,
+		modelRegistry: ctx.modelRegistry,
+		sessionManager: ctx.sessionManager,
+	};
+
+	void runtime.launchConsolidationTask(ctx, async () => withDebugLogContext({ enabled: runtime.config.debugLog === true, cwd: ctx.cwd, runId }, async () => {
+		await runConsolidationPipeline(pi, runtime, consolidationCtx);
+	}));
 }
 
 export async function runConsolidationPipeline(

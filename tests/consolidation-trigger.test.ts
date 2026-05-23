@@ -44,11 +44,10 @@ function setup(args: {
 	appendEntryReturnsId?: boolean;
 }) {
 	let entries = [...args.entries];
-	let handler: ((event: unknown, ctx: any) => void) | undefined;
+	const handlers: Record<string, ((event: unknown, ctx: any) => void) | undefined> = {};
 	const pi = {
-		on: vi.fn((eventName: string, cb: typeof handler) => {
-			expect(eventName).toBe("turn_end");
-			handler = cb;
+		on: vi.fn((eventName: string, cb: (event: unknown, ctx: any) => void) => {
+			handlers[eventName] = cb;
 		}),
 		appendEntry: vi.fn((customType: string, data: unknown) => {
 			const id = `appended-${pi.appendEntry.mock.calls.length}`;
@@ -76,6 +75,7 @@ function setup(args: {
 		ensureConfig: vi.fn(),
 		resolveModel: vi.fn(async () => ({ ok: true, model: { reasoning: true }, apiKey: "key", headers: { h: "v" } })),
 		launchConsolidationTask: vi.fn((_ctx, work) => {
+			runtime.consolidationInFlight = true;
 			launchedWork = work;
 			return Promise.resolve();
 		}),
@@ -89,7 +89,8 @@ function setup(args: {
 		}),
 	};
 	registerConsolidationTrigger(pi as any, runtime as any);
-	if (!handler) throw new Error("consolidation handler not registered");
+	if (!handlers.agent_start) throw new Error("agent_start consolidation handler not registered");
+	if (!handlers.turn_end) throw new Error("turn_end consolidation handler not registered");
 	const ctx = {
 		cwd: "/tmp/project",
 		hasUI: true,
@@ -102,7 +103,9 @@ function setup(args: {
 		pi,
 		runtime,
 		ctx,
-		fire: () => handler!(undefined, ctx),
+		fire: (eventName = "turn_end") => handlers[eventName]!(undefined, ctx),
+		fireAgentStart: () => handlers.agent_start!(undefined, ctx),
+		fireTurnEnd: () => handlers.turn_end!(undefined, ctx),
 		runLaunchedWork: async () => launchedWork?.(),
 		getEntries: () => entries,
 	};
@@ -113,29 +116,76 @@ describe("V3 consolidation trigger", () => {
 	const obsB = observation("bbbbbbbbbbbb", { sourceEntryIds: ["raw-2"], tokenCount: 10 });
 	const refA = reflection("eeeeeeeeeeee", ["aaaaaaaaaaaa"]);
 
-	it("does not launch below all thresholds", () => {
+	it("registers agent_start and turn_end consolidation entrypoints", () => {
+		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
+		const { pi } = setup({ entries });
+
+		expect(pi.on).toHaveBeenCalledWith("agent_start", expect.any(Function));
+		expect(pi.on).toHaveBeenCalledWith("turn_end", expect.any(Function));
+	});
+
+	it("does not launch below all thresholds from either entrypoint", () => {
 		const entries = [
 			textCustomMessage("raw-1", "aaaa"),
 			observationsRecordedEntry("om-obs", { observations: [obsA], coversUpToId: "raw-1" }),
 			reflectionsRecordedEntry("om-ref", { reflections: [refA], coversUpToId: "raw-1" }),
 			observationsDroppedEntry("om-drop", { observationIds: ["aaaaaaaaaaaa"], coversUpToId: "raw-1" }),
 		];
-		const { fire, runtime } = setup({ entries, observeAfterTokens: 10, reflectAfterTokens: 10 });
+		const { fireAgentStart, fireTurnEnd, runtime } = setup({ entries, observeAfterTokens: 10, reflectAfterTokens: 10 });
 
-		fire();
+		fireAgentStart();
+		fireTurnEnd();
 
 		expect(runtime.launchConsolidationTask).not.toHaveBeenCalled();
 	});
 
-	it("does not launch in passive mode or while consolidation is already in flight", () => {
+	it("does not launch from either entrypoint in passive mode", () => {
 		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
 		const passive = setup({ entries, passive: true });
-		passive.fire();
-		expect(passive.runtime.launchConsolidationTask).not.toHaveBeenCalled();
 
+		passive.fireAgentStart();
+		passive.fireTurnEnd();
+
+		expect(passive.runtime.launchConsolidationTask).not.toHaveBeenCalled();
+	});
+
+	it("does not launch from either entrypoint while consolidation is already in flight", () => {
+		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
 		const locked = setup({ entries, consolidationInFlight: true });
-		locked.fire();
+
+		locked.fireAgentStart();
+		locked.fireTurnEnd();
+
 		expect(locked.runtime.launchConsolidationTask).not.toHaveBeenCalled();
+	});
+
+	it("launches from agent_start when work is due", () => {
+		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
+		const { fireAgentStart, runtime } = setup({ entries });
+
+		fireAgentStart();
+
+		expect(runtime.launchConsolidationTask).toHaveBeenCalledTimes(1);
+	});
+
+	it("uses the shared lock when agent_start fires before turn_end", () => {
+		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
+		const { fireAgentStart, fireTurnEnd, runtime } = setup({ entries });
+
+		fireAgentStart();
+		fireTurnEnd();
+
+		expect(runtime.launchConsolidationTask).toHaveBeenCalledTimes(1);
+	});
+
+	it("uses the shared lock when turn_end fires before agent_start", () => {
+		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
+		const { fireAgentStart, fireTurnEnd, runtime } = setup({ entries });
+
+		fireTurnEnd();
+		fireAgentStart();
+
+		expect(runtime.launchConsolidationTask).toHaveBeenCalledTimes(1);
 	});
 
 	it("runs observer first and appends source-addressed observations", async () => {
