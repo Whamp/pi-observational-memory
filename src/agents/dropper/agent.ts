@@ -2,6 +2,7 @@ import { agentLoop, type AgentContext, type AgentLoopConfig, type AgentTool } fr
 import type { Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { Type } from "@earendil-works/pi-ai";
 import type { Static } from "typebox";
+import { debugLog } from "../../debug-log.js";
 import { AGENT_LOOP_MAX_TOKENS, boundedMaxTokens } from "../../model-budget.js";
 import { observationToSummaryLine, reflectionToSummaryLine, type Observation, type Reflection } from "../../session-ledger/index.js";
 import { DROPPER_SYSTEM } from "./prompts.js";
@@ -42,6 +43,13 @@ type DropObservationsArgs = Static<typeof DropObservationsSchema>;
 
 function joinOrEmpty(items: string[]): string {
 	return items.length ? items.join("\n") : "(none yet)";
+}
+
+function relevanceCounts(observations: readonly Observation[]): Record<Observation["relevance"], number> {
+	return observations.reduce<Record<Observation["relevance"], number>>((counts, observation) => {
+		counts[observation.relevance]++;
+		return counts;
+	}, { low: 0, medium: 0, high: 0, critical: 0 });
 }
 
 export function normalizeDropObservationIds(
@@ -96,10 +104,37 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
 
 	const metrics = observationPoolMetrics(observations, targetTokens);
 	const { observationTokens, fullness, tokensOverTarget, maxDropsAllowed } = metrics;
-	if (maxDropsAllowed <= 0) return undefined;
+	debugLog("dropper.agent_start", {
+		activeObservationCount: observations.length,
+		reflectionCount: reflections.length,
+		observationTokens,
+		targetTokens,
+		tokensOverTarget,
+		fullness,
+		maxDropsAllowed,
+		relevanceCounts: relevanceCounts(observations),
+	});
+	if (maxDropsAllowed <= 0) {
+		debugLog("dropper.result", {
+			reason: "not_over_target",
+			toolCallCount: 0,
+			rawRequestedIdsCount: 0,
+			acceptedCandidateCount: 0,
+			selectedDropsCount: 0,
+			maxDropsAllowed,
+		});
+		return undefined;
+	}
 
 	const proposedDropIds: string[] = [];
 	const proposed = new Set<string>();
+	const allowed = new Map(observations.map((observation) => [observation.id, observation]));
+	let toolCallCount = 0;
+	let rawRequestedIdsCount = 0;
+	let missingIdsCount = 0;
+	let criticalIdsCount = 0;
+	let duplicateInRequestCount = 0;
+	let duplicateInRunCount = 0;
 
 	const dropObservations: AgentTool<typeof DropObservationsSchema> = {
 		name: "drop_observations",
@@ -107,14 +142,52 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
 		description: "Propose active observation ids that are safe to remove from compacted memory.",
 		parameters: DropObservationsSchema,
 		execute: async (_id, params: DropObservationsArgs) => {
-			const normalized = normalizeDropObservationIds(params.ids, observations) ?? [];
+			toolCallCount++;
+			rawRequestedIdsCount += params.ids.length;
+			const seenInRequest = new Set<string>();
 			let added = 0;
-			for (const id of normalized) {
-				if (proposed.has(id)) continue;
+			let requestMissingIds = 0;
+			let requestCriticalIds = 0;
+			let requestDuplicateIds = 0;
+			let requestDuplicateInRunIds = 0;
+			for (const id of params.ids) {
+				const observation = allowed.get(id);
+				if (!observation) {
+					missingIdsCount++;
+					requestMissingIds++;
+					continue;
+				}
+				if (observation.relevance === "critical") {
+					criticalIdsCount++;
+					requestCriticalIds++;
+					continue;
+				}
+				if (seenInRequest.has(id)) {
+					duplicateInRequestCount++;
+					requestDuplicateIds++;
+					continue;
+				}
+				seenInRequest.add(id);
+				if (proposed.has(id)) {
+					duplicateInRunCount++;
+					requestDuplicateInRunIds++;
+					continue;
+				}
 				proposed.add(id);
 				proposedDropIds.push(id);
 				added++;
 			}
+			debugLog("dropper.tool_call", {
+				toolCallCount,
+				rawRequestedIdsCount: params.ids.length,
+				acceptedIdsCount: added,
+				missingIdsCount: requestMissingIds,
+				criticalIdsCount: requestCriticalIds,
+				duplicateInRequestCount: requestDuplicateIds,
+				duplicateInRunCount: requestDuplicateInRunIds,
+				totalCandidates: proposedDropIds.length,
+				maxDropsAllowed,
+			});
 			return {
 				content: [{ type: "text", text: `Queued ${added} drop candidate${added === 1 ? "" : "s"}. Candidates this run: ${proposedDropIds.length}. Maximum drops allowed: ${maxDropsAllowed}.` }],
 				details: { added, totalCandidates: proposedDropIds.length, maxDropsAllowed },
@@ -148,5 +221,24 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
 	}
 	await stream.result();
 	const droppedIds = selectDropCandidates(proposedDropIds, observations, maxDropsAllowed);
+	const reason = droppedIds.length > 0
+		? "selected_nonempty"
+		: toolCallCount === 0
+			? "no_tool_call"
+			: proposedDropIds.length === 0
+				? "all_filtered"
+				: "selected_empty";
+	debugLog("dropper.result", {
+		reason,
+		toolCallCount,
+		rawRequestedIdsCount,
+		missingIdsCount,
+		criticalIdsCount,
+		duplicateInRequestCount,
+		duplicateInRunCount,
+		acceptedCandidateCount: proposedDropIds.length,
+		selectedDropsCount: droppedIds.length,
+		maxDropsAllowed,
+	});
 	return droppedIds.length > 0 ? droppedIds : undefined;
 }

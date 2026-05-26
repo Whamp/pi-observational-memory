@@ -305,6 +305,17 @@ async function runDropperStage(
 		});
 		return "continue";
 	}
+	debugLog("dropper.stage_start", {
+		observationCoverageId,
+		sameRunReflectionCoverageId,
+		sameRunReflectionCount: sameRunReflections.length,
+		activeObservationCount: metrics.activeObservationCount,
+		observationTokens: metrics.observationTokens,
+		targetTokens: metrics.targetTokens,
+		tokensOverTarget: metrics.tokensOverTarget,
+		fullness: metrics.fullness,
+		maxDropsAllowed: metrics.maxDropsAllowed,
+	});
 
 	if (ctx.hasUI) ctx.ui?.notify(
 		`Observational memory: dropper running after reflection — active observation pool ~${metrics.observationTokens.toLocaleString()} / ${metrics.targetTokens.toLocaleString()} target tokens (${Math.round(metrics.fullness * 100).toLocaleString()}%)`,
@@ -326,6 +337,12 @@ async function runDropperStage(
 	});
 	const coversUpToId = earlierCoverageMarkerId(entries, observationCoverageId, sameRunReflectionCoverageId);
 	const data = coversUpToId && droppedIds ? buildObservationsDroppedData(droppedIds, coversUpToId) : undefined;
+	debugLog("dropper.append", {
+		droppedIdsCount: droppedIds?.length ?? 0,
+		coversUpToId,
+		dataBuilt: data !== undefined,
+		appended: data !== undefined,
+	});
 	if (data) appendEntry(pi, OM_OBSERVATIONS_DROPPED, data);
 	return "continue";
 }
