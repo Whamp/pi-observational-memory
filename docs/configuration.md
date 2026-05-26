@@ -53,17 +53,17 @@ You can omit everything. Defaults work for ordinary sessions, and if `model` is 
 | Setting | Type | Default | What it controls |
 |---|---:|---:|---|
 | `observeAfterTokens` | positive integer | `10000` | Raw/source token threshold for observer runs. |
-| `reflectAfterTokens` | positive integer | `20000` | Raw/source token threshold for reflector and dropper clocks. |
+| `reflectAfterTokens` | positive integer | `20000` | Raw/source token threshold for reflector runs; successful reflection creates dropper maintenance opportunities. |
 | `compactAfterTokens` | positive integer | `81000` | Raw/source token threshold for proactive auto-compaction. |
 | `observationsPoolMaxTokens` | positive integer | `20000` | Normal compaction-projection observation-token pressure that makes compaction do a full fold. |
-| `observationsPoolTargetTokens` | positive integer below max | half of `observationsPoolMaxTokens` | Folded active-ledger observation target used by post-reflection dropper maintenance. |
+| `observationsPoolTargetTokens` | positive integer below max | half of `observationsPoolMaxTokens` | Folded active observation target used by post-reflection dropper maintenance. |
 | `agentMaxTurns` | positive integer | `16` | Shared nested-agent turn cap for observer, reflector, and dropper. |
 | `model` | object | unset | Optional model override for observer, reflector, and dropper. |
 | `model.provider` | string | unset | Provider name in Pi's model registry. Required when `model` is set. |
 | `model.id` | string | unset | Model id in Pi's model registry. Required when `model` is set. |
 | `model.thinking` | enum | unset; workers fall back to `low` | Optional reasoning/thinking level for memory workers. |
 | `passive` | boolean | `false` | Disables proactive background memory and auto-compaction triggers. |
-| `debugLog` | boolean | `false` | Writes best-effort extension debug events to Pi's agent directory. |
+| `debugLog` | boolean | `false` | Writes best-effort per-session extension debug events to Pi's agent directory. |
 
 Valid `model.thinking` values are `off`, `minimal`, `low`, `medium`, `high`, and `xhigh`.
 
@@ -103,13 +103,15 @@ Default: `20000`.
 
 This controls V3's full-fold pressure. During compaction, the extension builds the normal compaction projection: observations whose `coversUpToId` reaches the compaction boundary, with reflection/drop effects held stable from the latest full fold. If there is no previous full fold, normal compaction includes observations only. If that projection's active observation tokens are at or above `observationsPoolMaxTokens`, compaction performs a full fold through the compaction boundary and applies observations, reflections, and drops by coverage marker. Otherwise, it keeps reflection/drop effects stable from the latest full fold and projects only observations through the new boundary.
 
-This is not the active-ledger dropper target and not a scheduling threshold for the reflector. Use `observationsPoolTargetTokens` for dropper active-ledger maintenance and `reflectAfterTokens` for reflector cadence.
+This is not the active observation dropper target and not a scheduling threshold for the reflector. Use `observationsPoolTargetTokens` for dropper active observation maintenance and `reflectAfterTokens` for reflector cadence.
 
 ## `observationsPoolTargetTokens`
 
 Default: half of `observationsPoolMaxTokens`.
 
-This controls the folded active observation ledger target used by the dropper. If folded active observation tokens are at or below this target, the dropper has no maintenance work. If they are over target, the dropper can run only after the reflector records non-empty reflections in the same consolidation pass.
+This controls the folded active observation target used by the dropper. If folded active observation tokens are at or below this target, the dropper has no maintenance work. If they are over target, the dropper can run only after the reflector records non-empty reflections in the same consolidation pass.
+
+With the defaults, `observationsPoolMaxTokens` is `20000` and `observationsPoolTargetTokens` is `10000`. If the active observation pool reaches about `20000` tokens, the dropper computes a maximum count intended to move it back toward about `10000` tokens, but the model may drop fewer or none.
 
 When the dropper runs, it computes how many tokens are over target, converts that token excess to an approximate observation-count maximum using average active observation size, and passes that maximum to the model as a hard upper bound. The model may drop fewer or none, and code still rejects protected/invalid candidates such as `critical` observations.
 
@@ -165,7 +167,29 @@ Unrecognized values are ignored.
 
 Default: `false`.
 
-When enabled, the extension writes best-effort JSONL debug events under Pi's agent directory, currently `observational-memory/debug.ndjson` relative to the agent dir. Debug logs can include memory content, ids, file paths, errors, and project details. Treat them as sensitive local debugging artifacts.
+When enabled, the extension writes best-effort NDJSON debug events under Pi's agent directory. Normal Pi sessions write to a per-session file:
+
+```txt
+observational-memory/debug/<session-id>.ndjson
+```
+
+Contexts without a usable session id fall back to the legacy global file:
+
+```txt
+observational-memory/debug.ndjson
+```
+
+Each row includes event metadata such as `sessionId`, `sessionFile`, `runId`, `cwd`, and event-specific `data`. `runId` identifies one consolidation pipeline inside a session file, so you can filter a session log to a single observer/reflector/dropper pass.
+
+Dropper diagnostics are especially useful when the active observation pool is over target but no drops are appended. For example:
+
+```bash
+grep '"event":"dropper' ~/.pi/agent/observational-memory/debug/<session-id>.ndjson | tail -n 50
+```
+
+Look for `dropper.result`: `no_tool_call` means the model chose not to drop anything, `all_filtered` means proposed ids were unusable, and `selected_nonempty` means usable drops were selected before append handling.
+
+Debug logs are opt-in local debugging artifacts. By default, diagnostic events should record aggregate counts, token totals, ids, file paths, errors, and project details rather than observation/reflection content, prompts, model responses, or raw model-proposed drop ids. Treat debug files as sensitive local artifacts.
 
 Debug-log write failures do not change memory behavior.
 
@@ -177,7 +201,7 @@ V3 is not backwards compatible with V2 settings. Old keys are silently ignored a
 |---|---|---|
 | `observationThresholdTokens` | `observeAfterTokens` | Rename. Same rough observer-cadence role. |
 | `compactionThresholdTokens` | `compactAfterTokens` | Rename. Same rough proactive-compaction role. |
-| `reflectionThresholdTokens` | `reflectAfterTokens`, `observationsPoolMaxTokens`, and/or `observationsPoolTargetTokens` | Split. Use `reflectAfterTokens` for reflector cadence, `observationsPoolMaxTokens` for compaction full-fold pressure, and `observationsPoolTargetTokens` for dropper active-ledger maintenance. |
+| `reflectionThresholdTokens` | `reflectAfterTokens`, `observationsPoolMaxTokens`, and/or `observationsPoolTargetTokens` | Split. Use `reflectAfterTokens` for reflector cadence, `observationsPoolMaxTokens` for compaction full-fold pressure, and `observationsPoolTargetTokens` for dropper active observation maintenance. |
 | `compactionModel` | `model` | Move `{ provider, id }` under `model`. |
 | `thinkingLevel` | `model.thinking` | Move under `model`. |
 | `observerMaxTurnsPerRun` | `agentMaxTurns` | Replace with one shared cap. |

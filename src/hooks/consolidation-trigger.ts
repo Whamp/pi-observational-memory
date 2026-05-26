@@ -35,7 +35,11 @@ type ConsolidationCtx = {
 	ui?: { notify: (message: string, type?: "warning" | "info" | "error") => void };
 	model: unknown;
 	modelRegistry: any;
-	sessionManager: { getBranch: () => unknown };
+	sessionManager: {
+		getBranch: () => unknown;
+		getSessionId?: () => string;
+		getSessionFile?: () => string | undefined;
+	};
 };
 
 type StageOutcome = "continue" | "abort";
@@ -100,6 +104,17 @@ export function registerConsolidationTrigger(pi: ExtensionAPI, runtime: Runtime)
 	pi.on("turn_end", launch);
 }
 
+function debugSessionMetadata(ctx: ConsolidationCtx): { sessionId?: string; sessionFile?: string } {
+	try {
+		return {
+			sessionId: ctx.sessionManager.getSessionId?.(),
+			sessionFile: ctx.sessionManager.getSessionFile?.(),
+		};
+	} catch {
+		return {};
+	}
+}
+
 function maybeLaunchConsolidation(pi: ExtensionAPI, runtime: Runtime, ctx: ConsolidationCtx): void {
 	runtime.ensureConfig(ctx.cwd);
 	if (runtime.config.passive === true) return;
@@ -118,7 +133,13 @@ function maybeLaunchConsolidation(pi: ExtensionAPI, runtime: Runtime, ctx: Conso
 		sessionManager: ctx.sessionManager,
 	};
 
-	void runtime.launchConsolidationTask(ctx, async () => withDebugLogContext({ enabled: runtime.config.debugLog === true, cwd: ctx.cwd, runId }, async () => {
+	const sessionMetadata = debugSessionMetadata(ctx);
+	void runtime.launchConsolidationTask(ctx, async () => withDebugLogContext({
+		enabled: runtime.config.debugLog === true,
+		cwd: ctx.cwd,
+		...sessionMetadata,
+		runId,
+	}, async () => {
 		await runConsolidationPipeline(pi, runtime, consolidationCtx);
 	}));
 }
@@ -221,7 +242,6 @@ async function runObserverStage(
 		count: observations.length,
 		observationTokens: observations.reduce((sum, observation) => sum + observation.tokenCount, 0),
 		coversUpToId,
-		observations,
 	});
 	appendEntry(pi, OM_OBSERVATIONS_RECORDED, data);
 	debugLog("observer.appended", { count: observations.length, coversUpToId });
