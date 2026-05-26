@@ -183,12 +183,12 @@ Reflect/drop also runs on `turn_end`, but only when the observer is not due.
 2. Skip if `passive` is true.
 3. Skip if observer or reflect/drop work is already in flight.
 4. Skip if observer progress has reached `observeAfterTokens`.
-5. Check reflector and dropper raw-token clocks against `reflectAfterTokens`.
-6. Resolve the model once.
+5. Check the reflector raw-token clock against `reflectAfterTokens` and check dropper readiness against the folded active observation pool.
+6. Resolve the model only for stages that are ready to run.
 7. Fold current ledger state.
 8. If reflector is due and observation coverage exists, run the reflector.
 9. Append non-empty `om.reflections.recorded` with `coversUpToId` set to the latest observation coverage marker.
-10. If dropper is due, run the dropper after reflector. It can see same-turn reflections.
+10. If the active ledger observation pool is at or above `observationsPoolMaxTokens` and has droppable non-critical observations, run the dropper after reflector. It can see same-turn reflections.
 11. Append non-empty `om.observations.dropped` with `coversUpToId` set to the earlier branch position of latest observation coverage and latest effective reflection coverage. If no reflection coverage exists yet, dropper bootstraps to observation coverage.
 
 Reflector failure skips same-turn dropper when both were due. Dropper failure does not roll back already-appended reflections.
@@ -251,7 +251,7 @@ When compaction runs, the projection helper decides whether this compaction is a
 
 ### Diff projection
 
-Diff projection compares visible memory with full memory. `/om-status` uses this to show recorded-vs-visible drift.
+Diff projection compares visible memory with full memory. `/om-status` uses this to show recorded-vs-visible drift. `/om-status` also reports the visible observation pool separately from the folded active ledger pool because compaction pressure and dropper pressure intentionally use different projections.
 
 ## Summary rendering
 
@@ -284,8 +284,9 @@ Shows:
 
 - recorded/dropped/visible observation counts, with plain `+N` / `-N` visible-vs-full drift suffixes when drift exists;
 - recorded/visible reflection counts, with a plain `+N` drift suffix when full memory has extra reflections;
-- next observation/reflection/drop/compaction token progress;
-- observation pool pressure against `observationsPoolMaxTokens`;
+- next observation/reflection/compaction token progress and drop coverage since the last successful drop;
+- visible observation pool pressure against `observationsPoolMaxTokens` from the current compaction projection;
+- active ledger pool pressure against `observationsPoolMaxTokens` from folded active observations;
 - reflection pool token total;
 - passive mode;
 - worker in-flight flags;

@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { runDropper } from "../agents/dropper/agent.js";
+import { observationPoolMetrics, type ObservationPoolMetrics } from "../agents/dropper/pool.js";
 import { runObserver } from "../agents/observer/agent.js";
 import { runReflector } from "../agents/reflector/agent.js";
 import { debugLog, withDebugLogContext } from "../debug-log.js";
@@ -19,7 +20,6 @@ import {
 	latestCoverageIndex,
 	latestCoverageMarkerId,
 	observationToSummaryLine,
-	rawTokensSinceDropCoverage,
 	rawTokensSinceObservationCoverage,
 	rawTokensSinceReflectionCoverage,
 	reflectionToSummaryLine,
@@ -65,10 +65,20 @@ function mergeReflections(existing: Reflection[], additional: Reflection[]): Ref
 	return merged;
 }
 
+function dropperPoolMetrics(entries: Entry[], runtime: Runtime): ObservationPoolMetrics {
+	const folded = foldLedger(entries);
+	return observationPoolMetrics(folded.activeObservations, runtime.config.observationsPoolMaxTokens);
+}
+
+function isDropperDue(entries: Entry[], runtime: Runtime): boolean {
+	if (!latestCoverageMarkerId(entries, OM_OBSERVATIONS_RECORDED)) return false;
+	return dropperPoolMetrics(entries, runtime).ready;
+}
+
 function anyStageDue(entries: Entry[], runtime: Runtime): boolean {
 	return rawTokensSinceObservationCoverage(entries) >= runtime.config.observeAfterTokens
 		|| rawTokensSinceReflectionCoverage(entries) >= runtime.config.reflectAfterTokens
-		|| rawTokensSinceDropCoverage(entries) >= runtime.config.reflectAfterTokens;
+		|| isDropperDue(entries, runtime);
 }
 
 function makeModelResolver(runtime: Runtime, ctx: ConsolidationCtx): (stage: "observer" | "reflector" | "dropper") => Promise<ResolvedModel | undefined> {
@@ -284,20 +294,29 @@ async function runDropperStage(
 	sameRunReflectionCoverageId: string | undefined,
 ): Promise<StageOutcome> {
 	const entries = ctx.sessionManager.getBranch() as Entry[];
-	const dropTokens = rawTokensSinceDropCoverage(entries);
-	if (dropTokens < runtime.config.reflectAfterTokens) return "continue";
-
 	const observationCoverageId = latestCoverageMarkerId(entries, OM_OBSERVATIONS_RECORDED);
 	if (!observationCoverageId) return "continue";
 
+	const folded = foldLedger(entries);
+	const metrics = observationPoolMetrics(folded.activeObservations, runtime.config.observationsPoolMaxTokens);
+	if (!metrics.ready) {
+		debugLog("dropper.not_ready", {
+			observationTokens: metrics.observationTokens,
+			budgetTokens: metrics.budgetTokens,
+			fullness: metrics.fullness,
+			droppableCount: metrics.droppableCount,
+			maxDropsAllowed: metrics.maxDropsAllowed,
+		});
+		return "continue";
+	}
+
 	if (ctx.hasUI) ctx.ui?.notify(
-		`Observational memory: dropper running (~${dropTokens.toLocaleString()} tokens)`,
+		`Observational memory: dropper running — active ledger pool ~${metrics.observationTokens.toLocaleString()} / ${metrics.budgetTokens.toLocaleString()} tokens (${Math.round(metrics.fullness * 100).toLocaleString()}%)`,
 		"info",
 	);
 	const resolved = await resolveModel("dropper");
 	if (!resolved) return "abort";
 
-	const folded = foldLedger(entries);
 	const reflectionsForDropper = mergeReflections(folded.reflections, sameRunReflections);
 	const droppedIds = await runDropper({
 		model: resolved.model as any,

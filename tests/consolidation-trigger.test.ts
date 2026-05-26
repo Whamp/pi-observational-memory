@@ -39,6 +39,7 @@ function setup(args: {
 	entries: TestEntry[];
 	observeAfterTokens?: number;
 	reflectAfterTokens?: number;
+	observationsPoolMaxTokens?: number;
 	passive?: boolean;
 	consolidationInFlight?: boolean;
 	appendEntryReturnsId?: boolean;
@@ -62,7 +63,7 @@ function setup(args: {
 			debugLog: false,
 			observeAfterTokens: args.observeAfterTokens ?? 1,
 			reflectAfterTokens: args.reflectAfterTokens ?? 1,
-			observationsPoolMaxTokens: 100,
+			observationsPoolMaxTokens: args.observationsPoolMaxTokens ?? 100,
 			agentMaxTurns: 9,
 			model: { provider: "anthropic", id: "memory", thinking: "minimal" },
 		},
@@ -292,7 +293,7 @@ describe("V3 consolidation trigger", () => {
 			observationsRecordedEntry("om-obs", { observations: [obsA], coversUpToId: "raw-1" }),
 			reflectionsRecordedEntry("om-ref", { reflections: [refA], coversUpToId: "raw-1" }),
 		];
-		const { fire, runLaunchedWork, pi } = setup({ entries, observeAfterTokens: 999 });
+		const { fire, runLaunchedWork, pi } = setup({ entries, observeAfterTokens: 999, observationsPoolMaxTokens: 10 });
 
 		fire();
 		await runLaunchedWork();
@@ -300,6 +301,52 @@ describe("V3 consolidation trigger", () => {
 		expect(mockAgents.runReflector).not.toHaveBeenCalled();
 		expect(mockAgents.runDropper).toHaveBeenCalledWith(expect.objectContaining({ reflections: [refA], observations: [obsA] }));
 		expect(pi.appendEntry).toHaveBeenCalledWith(OM_OBSERVATIONS_DROPPED, { observationIds: ["aaaaaaaaaaaa"], coversUpToId: "raw-1" });
+	});
+
+	it("does not launch dropper-only work when raw drop coverage is overdue but active pool is under budget", () => {
+		const entries = [
+			textCustomMessage("raw-1", "aaaaaaaa"),
+			observationsRecordedEntry("om-obs", { observations: [obsA], coversUpToId: "raw-1" }),
+			textCustomMessage("raw-2", "bbbbbbbb"),
+			reflectionsRecordedEntry("om-ref", { reflections: [refA], coversUpToId: "raw-2" }),
+		];
+		const { fire, runtime } = setup({ entries, observeAfterTokens: 999, reflectAfterTokens: 1, observationsPoolMaxTokens: 100 });
+
+		fire();
+
+		expect(runtime.launchConsolidationTask).not.toHaveBeenCalled();
+	});
+
+	it("launches dropper-only work when active ledger pool is over budget even without raw-token drop due-ness", async () => {
+		mockAgents.runDropper.mockResolvedValueOnce(["aaaaaaaaaaaa"]);
+		const entries = [
+			textCustomMessage("raw-1", "aaaaaaaa"),
+			observationsRecordedEntry("om-obs", { observations: [obsA], coversUpToId: "raw-1" }),
+			reflectionsRecordedEntry("om-ref", { reflections: [refA], coversUpToId: "raw-1" }),
+		];
+		const { fire, runLaunchedWork, runtime } = setup({ entries, observeAfterTokens: 999, reflectAfterTokens: 999, observationsPoolMaxTokens: 10 });
+
+		fire();
+		await runLaunchedWork();
+
+		expect(runtime.launchConsolidationTask).toHaveBeenCalledTimes(1);
+		expect(mockAgents.runDropper).toHaveBeenCalledWith(expect.objectContaining({ observations: [obsA] }));
+	});
+
+	it("does not launch dropper-only work when dropped tombstones reduce active pool below budget", () => {
+		const heavy = observation("cccccccccccc", { sourceEntryIds: ["raw-1"], tokenCount: 100 });
+		const entries = [
+			textCustomMessage("raw-1", "aaaaaaaa"),
+			observationsRecordedEntry("om-obs", { observations: [heavy], coversUpToId: "raw-1" }),
+			observationsDroppedEntry("om-drop", { observationIds: ["cccccccccccc"], coversUpToId: "raw-1" }),
+			textCustomMessage("raw-2", "bbbbbbbb"),
+			reflectionsRecordedEntry("om-ref", { reflections: [refA], coversUpToId: "raw-2" }),
+		];
+		const { fire, runtime } = setup({ entries, observeAfterTokens: 999, reflectAfterTokens: 1, observationsPoolMaxTokens: 100 });
+
+		fire();
+
+		expect(runtime.launchConsolidationTask).not.toHaveBeenCalled();
 	});
 
 	it("caps drop coverage at the earlier observation/reflection coverage", async () => {
@@ -311,7 +358,7 @@ describe("V3 consolidation trigger", () => {
 			textCustomMessage("raw-2", "bbbbbbbb"),
 			observationsRecordedEntry("om-obs-b", { observations: [obsB], coversUpToId: "raw-2" }),
 		];
-		const first = setup({ entries: reflectionLagEntries, observeAfterTokens: 999, reflectAfterTokens: 3 });
+		const first = setup({ entries: reflectionLagEntries, observeAfterTokens: 999, reflectAfterTokens: 3, observationsPoolMaxTokens: 10 });
 		first.fire();
 		await first.runLaunchedWork();
 		expect(first.pi.appendEntry).toHaveBeenCalledWith(OM_OBSERVATIONS_DROPPED, { observationIds: ["bbbbbbbbbbbb"], coversUpToId: "raw-1" });
@@ -324,7 +371,7 @@ describe("V3 consolidation trigger", () => {
 			textCustomMessage("raw-2", "bbbbbbbb"),
 			reflectionsRecordedEntry("om-ref", { reflections: [refA], coversUpToId: "raw-2" }),
 		];
-		const second = setup({ entries: observationLagEntries, observeAfterTokens: 999 });
+		const second = setup({ entries: observationLagEntries, observeAfterTokens: 999, observationsPoolMaxTokens: 10 });
 		second.fire();
 		await second.runLaunchedWork();
 		expect(second.pi.appendEntry).toHaveBeenCalledWith(OM_OBSERVATIONS_DROPPED, { observationIds: ["aaaaaaaaaaaa"], coversUpToId: "raw-1" });
@@ -337,7 +384,7 @@ describe("V3 consolidation trigger", () => {
 			observationsRecordedEntry("om-obs", { observations: [obsA], coversUpToId: "raw-1" }),
 			textCustomMessage("raw-2", "bbbbbbbb"),
 		];
-		const { fire, runLaunchedWork, pi } = setup({ entries, observeAfterTokens: 999 });
+		const { fire, runLaunchedWork, pi } = setup({ entries, observeAfterTokens: 999, observationsPoolMaxTokens: 10 });
 
 		fire();
 		await runLaunchedWork();
@@ -371,7 +418,7 @@ describe("V3 consolidation trigger", () => {
 			textCustomMessage("raw-2", "bbbbbbbb"),
 			observationsRecordedEntry("om-obs-b", { observations: [obsB], coversUpToId: "raw-2" }),
 		];
-		const { fire, runLaunchedWork, pi } = setup({ entries, observeAfterTokens: 999 });
+		const { fire, runLaunchedWork, pi } = setup({ entries, observeAfterTokens: 999, observationsPoolMaxTokens: 10 });
 
 		fire();
 		await runLaunchedWork();
@@ -391,7 +438,7 @@ describe("V3 consolidation trigger", () => {
 			textCustomMessage("raw-2", "bbbbbbbb"),
 			observationsRecordedEntry("om-obs-b", { observations: [obsB], coversUpToId: "raw-2" }),
 		];
-		const { fire, runLaunchedWork, pi } = setup({ entries, observeAfterTokens: 999, appendEntryReturnsId: false });
+		const { fire, runLaunchedWork, pi } = setup({ entries, observeAfterTokens: 999, appendEntryReturnsId: false, observationsPoolMaxTokens: 10 });
 
 		fire();
 		await runLaunchedWork();
@@ -401,12 +448,14 @@ describe("V3 consolidation trigger", () => {
 
 	it("appends no empty reflection or drop entries", async () => {
 		const entries = [textCustomMessage("raw-1", "aaaaaaaa"), observationsRecordedEntry("om-obs", { observations: [obsA], coversUpToId: "raw-1" })];
-		const { fire, runLaunchedWork, pi } = setup({ entries, observeAfterTokens: 999 });
+		const { fire, runLaunchedWork, pi, ctx } = setup({ entries, observeAfterTokens: 999 });
 
 		fire();
 		await runLaunchedWork();
 
 		expect(pi.appendEntry).not.toHaveBeenCalled();
+		expect(mockAgents.runDropper).not.toHaveBeenCalled();
+		expect(ctx.ui.notify).not.toHaveBeenCalledWith(expect.stringContaining("dropper running"), "info");
 	});
 
 	it("preserves stage failure boundaries", async () => {
@@ -434,7 +483,7 @@ describe("V3 consolidation trigger", () => {
 		mockAgents.runReflector.mockResolvedValueOnce([newRef]);
 		mockAgents.runDropper.mockReset();
 		mockAgents.runDropper.mockRejectedValueOnce(new Error("drop failed"));
-		const dropperFailure = setup({ entries: [textCustomMessage("raw-1", "aaaaaaaa"), observationsRecordedEntry("om-obs", { observations: [obsA], coversUpToId: "raw-1" })], observeAfterTokens: 999 });
+		const dropperFailure = setup({ entries: [textCustomMessage("raw-1", "aaaaaaaa"), observationsRecordedEntry("om-obs", { observations: [obsA], coversUpToId: "raw-1" })], observeAfterTokens: 999, observationsPoolMaxTokens: 10 });
 		dropperFailure.fire();
 		await dropperFailure.runLaunchedWork();
 		expect(dropperFailure.runtime.lastDropperError).toBe("drop failed");

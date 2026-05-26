@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { observationPoolMetrics } from "../agents/dropper/pool.js";
 import type { Runtime } from "../runtime.js";
 import {
 	diffProjection,
@@ -46,6 +47,7 @@ export function registerStatusCommand(pi: ExtensionAPI, runtime: Runtime): void 
 
 			const visibleObservationTokens = tokenSum(visible.observations);
 			const visibleReflectionTokens = tokenSum(visible.reflections);
+			const activeObservationPool = observationPoolMetrics(folded.activeObservations, runtime.config.observationsPoolMaxTokens);
 			const observationLine = appendSuffixes(
 				`Observations: ${folded.observations.length} recorded / ${folded.droppedObservationIds.size} dropped / ${visible.observations.length} visible`,
 				[
@@ -79,10 +81,11 @@ export function registerStatusCommand(pi: ExtensionAPI, runtime: Runtime): void 
 				"── Activity ──",
 				`Next observation: ~${obsProgress.toLocaleString()} / ${runtime.config.observeAfterTokens.toLocaleString()} tokens (${pct(obsProgress, runtime.config.observeAfterTokens)}%)`,
 				`Next reflection:  ~${reflectionProgress.toLocaleString()} / ${runtime.config.reflectAfterTokens.toLocaleString()} tokens (${pct(reflectionProgress, runtime.config.reflectAfterTokens)}%)`,
-				`Next drop:        ~${dropProgress.toLocaleString()} / ${runtime.config.reflectAfterTokens.toLocaleString()} tokens (${pct(dropProgress, runtime.config.reflectAfterTokens)}%)`,
+				`Drop coverage:    ~${dropProgress.toLocaleString()} tokens since last successful drop`,
 				`Next compaction:  ~${compactionProgress.toLocaleString()} / ${runtime.config.compactAfterTokens.toLocaleString()} tokens (${pct(compactionProgress, runtime.config.compactAfterTokens)}%)`,
-				`Observation pool: ~${visibleObservationTokens.toLocaleString()} / ${runtime.config.observationsPoolMaxTokens.toLocaleString()} tokens (${pct(visibleObservationTokens, runtime.config.observationsPoolMaxTokens)}%)`,
-				`Reflection pool:  ~${visibleReflectionTokens.toLocaleString()} tokens`,
+				`Visible observation pool: ~${visibleObservationTokens.toLocaleString()} / ${runtime.config.observationsPoolMaxTokens.toLocaleString()} tokens (${pct(visibleObservationTokens, runtime.config.observationsPoolMaxTokens)}%)`,
+				`Active ledger pool:      ~${activeObservationPool.observationTokens.toLocaleString()} / ${runtime.config.observationsPoolMaxTokens.toLocaleString()} tokens (${pct(activeObservationPool.observationTokens, runtime.config.observationsPoolMaxTokens)}%)`,
+				`Reflection pool:         ~${visibleReflectionTokens.toLocaleString()} tokens`,
 			];
 
 			if (runtime.consolidationInFlight || runtime.compactInFlight || runtime.compactHookInFlight) {

@@ -5,6 +5,14 @@ import type { Static } from "typebox";
 import { AGENT_LOOP_MAX_TOKENS, boundedMaxTokens } from "../../model-budget.js";
 import { observationToSummaryLine, reflectionToSummaryLine, type Observation, type Reflection } from "../../session-ledger/index.js";
 import { DROPPER_SYSTEM } from "./prompts.js";
+import { dropUrgencyForFullness, observationPoolMetrics } from "./pool.js";
+export {
+	dropUrgencyForFullness,
+	maxDropCountForPool,
+	observationPoolFullness,
+	observationPoolMetrics,
+} from "./pool.js";
+export type { DropUrgency, ObservationPoolMetrics } from "./pool.js";
 
 interface RunDropperArgs {
 	model: Model<any>;
@@ -18,15 +26,6 @@ interface RunDropperArgs {
 	maxTurns?: number;
 	thinkingLevel?: ModelThinkingLevel;
 }
-
-const DROP_SKIP_FULLNESS = 0.10;
-const DROP_LOW_URGENCY_FULLNESS = 0.30;
-const DROP_MEDIUM_URGENCY_FULLNESS = 0.60;
-const DROP_MAX_FULLNESS = 1.00;
-const DROP_MIN_RATIO = 0.10;
-const DROP_MAX_RATIO = 0.50;
-
-export type DropUrgency = "low" | "medium" | "high";
 
 const RELEVANCE_DROP_RANK: Record<Observation["relevance"], number> = {
 	low: 0,
@@ -44,32 +43,6 @@ type DropObservationsArgs = Static<typeof DropObservationsSchema>;
 
 function joinOrEmpty(items: string[]): string {
 	return items.length ? items.join("\n") : "(none yet)";
-}
-
-export function observationPoolFullness(observationTokens: number, budgetTokens: number): number {
-	if (!Number.isFinite(observationTokens) || observationTokens <= 0) return 0;
-	if (!Number.isFinite(budgetTokens) || budgetTokens <= 0) return 0;
-	return observationTokens / budgetTokens;
-}
-
-export function dropUrgencyForFullness(fullness: number): DropUrgency {
-	if (fullness < DROP_LOW_URGENCY_FULLNESS) return "low";
-	if (fullness < DROP_MEDIUM_URGENCY_FULLNESS) return "medium";
-	return "high";
-}
-
-export function maxDropCountForPool(observations: readonly Observation[], observationTokens: number, budgetTokens: number): number {
-	const droppableCount = observations.filter((observation) => observation.relevance !== "critical").length;
-	if (droppableCount === 0) return 0;
-
-	const fullness = observationPoolFullness(observationTokens, budgetTokens);
-	if (fullness < DROP_SKIP_FULLNESS) return 0;
-
-	const cappedFullness = Math.min(DROP_MAX_FULLNESS, Math.max(DROP_SKIP_FULLNESS, fullness));
-	const dropRatio = DROP_MIN_RATIO
-		+ ((cappedFullness - DROP_SKIP_FULLNESS) / (DROP_MAX_FULLNESS - DROP_SKIP_FULLNESS))
-		* (DROP_MAX_RATIO - DROP_MIN_RATIO);
-	return Math.max(1, Math.floor(droppableCount * dropRatio));
 }
 
 export function normalizeDropObservationIds(
@@ -122,10 +95,9 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
 	const { model, apiKey, headers, reflections, observations, budgetTokens, signal } = args;
 	if (observations.length === 0) return undefined;
 
-	const observationTokens = observations.reduce((sum, observation) => sum + observation.tokenCount, 0);
-	const fullness = observationPoolFullness(observationTokens, budgetTokens);
+	const metrics = observationPoolMetrics(observations, budgetTokens);
+	const { observationTokens, fullness, maxDropsAllowed } = metrics;
 	const urgency = dropUrgencyForFullness(fullness);
-	const maxDropsAllowed = maxDropCountForPool(observations, observationTokens, budgetTokens);
 	if (maxDropsAllowed <= 0) return undefined;
 
 	const proposedDropIds: string[] = [];

@@ -230,7 +230,7 @@ Most users can start with the defaults and tune only if they have a specific rea
 | `observeAfterTokens`        | `10000`       | Raw/source token threshold for observation runs.                                                  |
 | `reflectAfterTokens`        | `20000`       | Raw/source token threshold for reflection and memory maintenance.                                 |
 | `compactAfterTokens`        | `81000`       | Raw/source token threshold for proactive auto-compaction.                                         |
-| `observationsPoolMaxTokens` | `20000`       | Normal compaction-projection observation-token pressure that triggers a full memory refresh.      |
+| `observationsPoolMaxTokens` | `20000`       | Observation-token budget used for compaction full-fold pressure and dropper active-ledger pressure. |
 | `agentMaxTurns`             | `16`          | Shared turn cap for background memory-agent loops.                                                |
 | `model`                     | session model | Optional memory-worker model override: `{ provider, id, thinking }`.                              |
 | `passive`                   | `false`       | Disables proactive background observation, reflection, maintenance, and auto-compaction triggers. |
@@ -255,7 +255,7 @@ For details and tuning guidance, see [`docs/configuration.md`](docs/configuratio
 
 | Surface             | What it does                                                                                                                                    |
 | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/om-status`        | Shows memory counts, plain `+N` / `-N` visible/full drift suffixes, progress clocks, memory pressure, passive/in-flight state, and last worker errors. |
+| `/om-status`        | Shows memory counts, plain `+N` / `-N` visible/full drift suffixes, progress clocks, visible and active-ledger memory pressure, passive/in-flight state, and last worker errors. |
 | `/om-view`          | Shows current visible memory and attempts to copy the rendered memory text to the clipboard.                                                   |
 | `/om-view full`     | Shows the full current memory state for the branch and attempts to copy the rendered memory text to the clipboard.                             |
 | `recall` agent tool | Recovers source evidence for a 12-character observation/reflection id on the current branch. It is not semantic search or a transcript browser. |
@@ -300,9 +300,9 @@ Current behavior:
 * **Observation-centered memory.** The extension records useful session observations while you work.
 * **Durable reflections.** The extension distills stable facts that help the agent stay oriented over time.
 * **Fast compaction.** `session_before_compact` does not call a model or wait for background workers. It renders the current prepared memory state.
-* **Background memory work.** Observation and reflection work run from `turn_end` when their token clocks are due.
+* **Background memory work.** Observation and reflection work run from `turn_end` when their token clocks are due; dropper work runs when the folded active observation ledger reaches its configured pool budget.
 * **Source-backed recall.** Observations and reflections can be traced back through the `recall` tool.
-* **Visible/full views.** `/om-view` shows visible memory and `/om-view full` shows the full current memory state. Use `/om-status` for visible-vs-full drift.
+* **Visible/full views.** `/om-view` shows visible memory and `/om-view full` shows the full current memory state. Use `/om-status` for visible-vs-full drift and for the separate visible observation pool vs active ledger pool.
 * **No V2 compatibility layer.** Old V2 settings and memory entries are ignored rather than migrated.
 
 ---
@@ -323,7 +323,7 @@ What this means in practice:
 | ---------------------------- | ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | `observationThresholdTokens` | `observeAfterTokens`                                    | Rename. Same rough role: observation cadence based on raw/source tokens.                                                                       |
 | `compactionThresholdTokens`  | `compactAfterTokens`                                    | Rename. Same rough role: proactive compaction cadence.                                                                                         |
-| `reflectionThresholdTokens`  | `reflectAfterTokens` and/or `observationsPoolMaxTokens` | Split. Use `reflectAfterTokens` for reflection scheduling. Use `observationsPoolMaxTokens` for compaction full-fold pressure. |
+| `reflectionThresholdTokens`  | `reflectAfterTokens` and/or `observationsPoolMaxTokens` | Split. Use `reflectAfterTokens` for reflection scheduling. Use `observationsPoolMaxTokens` for compaction full-fold pressure and dropper active-ledger pressure. |
 | `compactionModel`            | `model`                                                 | Move `{ provider, id }` to `model`.                                                                                                            |
 | `thinkingLevel`              | `model.thinking`                                        | Move under `model`.                                                                                                                            |
 | `observerMaxTurnsPerRun`     | `agentMaxTurns`                                         | Replace with the shared memory-agent turn cap.                                                                                                 |

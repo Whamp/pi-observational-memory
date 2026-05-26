@@ -80,9 +80,9 @@ It reads active observations and current reflections, then appends durable new r
 
 ### Dropper
 
-The dropper runs after the reflector in the same reflect/drop lane when its raw-token clock reaches `reflectAfterTokens`. If both are due, the reflector runs first and the dropper can see same-turn new reflections.
+The dropper runs after the reflector in the same reflect/drop lane when the folded active observation ledger reaches `observationsPoolMaxTokens` and has droppable non-critical observations. If the reflector is also due, the reflector runs first and the dropper can see same-turn new reflections.
 
-The dropper can only drop active observation ids. It cannot rewrite or merge observations. Code also protects `critical` observations from being dropped.
+The dropper can only drop active observation ids. It cannot rewrite or merge observations. Code also protects `critical` observations from being dropped. Its 10% low-fullness rule remains an internal safety floor that skips model execution below that level; it is not the launch threshold.
 
 ### Compaction hook
 

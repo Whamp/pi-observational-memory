@@ -85,6 +85,8 @@ describe("V3 /om-status", () => {
 
 		expect(output).toContain("Observations: 2 recorded / 1 dropped / 1 visible +1 -1");
 		expect(output).toContain("Reflections:  1 recorded / 0 visible +1");
+		expect(output).toContain("Visible observation pool: ~5 / 40 tokens (13%)");
+		expect(output).toContain("Active ledger pool:      ~7 / 40 tokens (18%)");
 		expect(output).not.toContain("Visible:");
 		expect(output).not.toContain("Drift:");
 		expect(output).not.toContain("full truth");
@@ -92,7 +94,7 @@ describe("V3 /om-status", () => {
 		expect(output).not.toContain("observational-memory");
 	});
 
-	it("shows separate progress clocks and observation/reflection pools", async () => {
+	it("shows separate progress clocks, visible pool, active ledger pool, and reflection pool", async () => {
 		const obs = observation("aaaaaaaaaaaa", { tokenCount: 5 });
 		const ref = reflection("eeeeeeeeeeee", ["aaaaaaaaaaaa"], { tokenCount: 3 });
 		const entries = [
@@ -109,12 +111,14 @@ describe("V3 /om-status", () => {
 		expect(output).toContain("/ 10 tokens");
 		expect(output).toContain("Next reflection:");
 		expect(output).toContain("/ 20 tokens");
-		expect(output).toContain("Next drop:");
+		expect(output).toContain("Drop coverage:");
+		expect(output).not.toContain("Next drop:");
 		expect(output).toContain("Next compaction:");
 		expect(output).toContain("/ 30 tokens");
-		expect(output).toContain("Observation pool:");
-		expect(output).toContain("~5 / 40 tokens (13%)");
-		expect(output).toContain("Reflection pool:  ~3 tokens");
+		expect(output).toContain("Visible observation pool: ~5 / 40 tokens (13%)");
+		expect(output).toContain("Active ledger pool:      ~5 / 40 tokens (13%)");
+		expect(output).toContain("Reflection pool:         ~3 tokens");
+		expect(output).not.toContain("Observation pool:");
 		expect(output).not.toContain("Full fold pool:");
 		expect(output).not.toContain("visible observation tokens");
 	});
