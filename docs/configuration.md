@@ -58,10 +58,13 @@ You can omit everything. Defaults work for ordinary sessions, and if `model` is 
 | `observationsPoolMaxTokens` | positive integer | `20000` | Normal compaction-projection observation-token pressure that makes compaction do a full fold. |
 | `observationsPoolTargetTokens` | positive integer below max | half of `observationsPoolMaxTokens` | Folded active observation target used by post-reflection dropper maintenance. |
 | `agentMaxTurns` | positive integer | `16` | Shared nested-agent turn cap for observer, reflector, and dropper. |
-| `model` | object | unset | Optional model override for observer, reflector, and dropper. |
+| `model` | object | unset | Shared fallback model for all stages; overridden by per-stage config. |
 | `model.provider` | string | unset | Provider name in Pi's model registry. Required when `model` is set. |
 | `model.id` | string | unset | Model id in Pi's model registry. Required when `model` is set. |
-| `model.thinking` | enum | unset; workers fall back to `low` | Optional reasoning/thinking level for memory workers. |
+| `model.thinking` | enum | unset; workers fall back to `low` | Shared fallback reasoning/thinking level for memory workers. |
+| `observer` | object | unset | Optional per-stage override; see [stage overrides](#stage-specific-model-and-thinking-overrides). |
+| `reflector` | object | unset | Optional per-stage override; the dropper inherits this by default. |
+| `dropper` | object | unset | Optional per-stage override; inherits the reflector when unset. |
 | `passive` | boolean | `false` | Disables proactive background memory and auto-compaction triggers. |
 | `debugLog` | boolean | `false` | Writes best-effort per-session extension debug events to Pi's agent directory. |
 
@@ -131,7 +134,7 @@ Use lower values to bound background memory-worker cost. Too low can reduce obse
 
 Default: unset, meaning memory workers use the session model.
 
-Set `model` when you want the observer, reflector, and dropper to use a cheaper or faster model than the main coding agent:
+Set `model` when you want the observer, reflector, and dropper to share a cheaper or faster model than the main coding agent. This is the shared fallback for every stage; set `observer`, `reflector`, or `dropper` to override a single stage (see [stage overrides](#stage-specific-model-and-thinking-overrides)):
 
 ```json
 {
@@ -146,6 +149,58 @@ Set `model` when you want the observer, reflector, and dropper to use a cheaper 
 ```
 
 `provider` and `id` must both be non-empty strings. `thinking` is optional. If the configured model cannot be resolved, the runtime attempts to fall back to the current session model and notifies once. If no usable model or API key is available, the relevant background worker skips/fails safely rather than inventing memory.
+
+## Stage-specific model and thinking overrides
+
+The observer, reflector, and dropper are different jobs and may want different models or thinking levels. Each stage accepts an optional `model` and `thinking` override:
+
+```json
+{
+  "observational-memory": {
+    "model": { "provider": "openrouter", "id": "shared-memory-model", "thinking": "low" },
+    "observer": { "thinking": "off" },
+    "reflector": { "model": { "provider": "openrouter", "id": "a-stronger-reflector", "thinking": "high" } },
+    "dropper": { "thinking": "medium" }
+  }
+}
+```
+
+Each stage object has the same shape and accepts:
+
+- `model` (object): a `{ provider, id, thinking? }` override for that stage only.
+- `thinking` (enum): one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh` for that stage only.
+
+Invalid stage config (non-object, empty models, unknown thinking values) is ignored, the same as invalid top-level config.
+
+### Resolution order
+
+When a value is unset, the resolver walks a fixed fallback chain so defaults are unchanged when no stage config is present.
+
+Model lookup (the model each stage runs on):
+
+```text
+observer.model   ?? model            ?? session model
+reflector.model  ?? model            ?? session model
+dropper.model    ?? reflector.model  ?? model ?? session model
+```
+
+Thinking level:
+
+```text
+observer.thinking   ?? observer.model.thinking   ?? model.thinking ?? "low"
+reflector.thinking  ?? reflector.model.thinking  ?? model.thinking ?? "low"
+dropper.thinking    ?? dropper.model.thinking    ?? reflector.thinking ?? model.thinking ?? "low"
+```
+
+The dropper inherits the reflector's settings by default because dropping is a judgment/compression task closer to reflection than literal observation. The dropper remains its own stage and can override both `model` and `thinking` independently.
+
+### Defaults are unchanged
+
+If you set none of `observer`, `reflector`, or `dropper`, every stage resolves to the shared `model` and `model.thinking ?? "low"` — exactly the previous behavior.
+
+### Choosing stage models
+
+Do not hardcode specific model ids in shared defaults; treat these as benchmark-driven choices. The observer tends to work best with cheap, literal, low/off thinking capture, while the reflector and dropper may benefit from more judgment. Configure per stage based on your own evaluation, and prefer measuring solve rate with your own tasks before committing to a split.
 
 ## `passive`
 
@@ -246,6 +301,20 @@ Tradeoff: fewer background model calls, but memory updates lag longer, observati
 ```
 
 Tradeoff: more background model calls.
+
+### Split observer and reflector models
+
+```json
+{
+  "observational-memory": {
+    "model": { "provider": "openrouter", "id": "a-fast-model", "thinking": "low" },
+    "observer": { "thinking": "off" },
+    "reflector": { "model": { "provider": "openrouter", "id": "a-stronger-reflector", "thinking": "high" } }
+  }
+}
+```
+
+The observer uses the shared model with thinking off (literal, cheap capture). The reflector runs a stronger model with higher thinking. The dropper is unset, so it inherits the reflector's model and thinking. Measure this against a single shared model on your own tasks before committing.
 
 ### Disable proactive work temporarily
 

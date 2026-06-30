@@ -234,7 +234,8 @@ Most users can start with the defaults and tune only if they have a specific rea
 | `observationsPoolMaxTokens` | `20000`       | Observation-token budget used for compaction full-fold pressure.                                  |
 | `observationsPoolTargetTokens` | half of max | Active observation target used by post-reflection dropper maintenance.                            |
 | `agentMaxTurns`             | `16`          | Shared turn cap for background memory-agent loops.                                                |
-| `model`                     | session model | Optional memory-worker model override: `{ provider, id, thinking }`.                              |
+| `model`                     | session model | Optional shared memory-worker model override: `{ provider, id, thinking }`. Per-stage overrides below.              |
+| `observer` / `reflector` / `dropper` | unset | Optional per-stage `{ model?, thinking? }` overrides. Dropper inherits reflector by default. See [configuration.md](docs/configuration.md#stage-specific-model-and-thinking-overrides). |
 | `passive`                   | `false`       | Disables proactive background observation, reflection, maintenance, and auto-compaction triggers. |
 | `debugLog`                  | `false`       | Writes opt-in per-session extension debug events to Pi's agent directory.                         |
 

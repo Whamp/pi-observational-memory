@@ -1,10 +1,12 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { runDropper } from "../agents/dropper/agent.js";
 import { observationPoolMetrics } from "../agents/dropper/pool.js";
 import { runObserver } from "../agents/observer/agent.js";
 import { runReflector } from "../agents/reflector/agent.js";
+import { resolveStageModel, type StageName } from "../config.js";
 import { debugLog, withDebugLogContext } from "../debug-log.js";
-import { type ResolveResult, type Runtime } from "../runtime.js";
+import { type Runtime } from "../runtime.js";
 import { serializeSourceAddressedBranchEntries } from "../serialize.js";
 import {
 	OM_OBSERVATIONS_DROPPED,
@@ -27,7 +29,12 @@ import {
 	type Reflection,
 } from "../session-ledger/index.js";
 
-type ResolvedModel = Extract<ResolveResult, { ok: true }>;
+type StageResolution = {
+	model: unknown;
+	apiKey: string;
+	headers?: Record<string, string>;
+	thinking: ModelThinkingLevel;
+};
 
 type ConsolidationCtx = {
 	cwd: string;
@@ -74,25 +81,35 @@ function anyStageDue(entries: Entry[], runtime: Runtime): boolean {
 		|| rawTokensSinceReflectionCoverage(entries) >= runtime.config.reflectAfterTokens;
 }
 
-function makeModelResolver(runtime: Runtime, ctx: ConsolidationCtx): (stage: "observer" | "reflector" | "dropper") => Promise<ResolvedModel | undefined> {
-	let cached: ResolveResult | undefined;
+function makeModelResolver(runtime: Runtime, ctx: ConsolidationCtx): (stage: StageName) => Promise<StageResolution | undefined> {
+	const cache = new Map<StageName, StageResolution>();
 	return async (stage) => {
-		cached ??= await runtime.resolveModel({
+		const cached = cache.get(stage);
+		if (cached) return cached;
+		const desired = resolveStageModel(runtime.config, stage);
+		const resolved = await runtime.resolveModel({
 			model: ctx.model,
 			modelRegistry: ctx.modelRegistry,
 			hasUI: ctx.hasUI,
 			ui: ctx.ui,
-		});
-		if (cached.ok) {
-			runtime.resolveFailureNotified = false;
-			return cached;
+		}, desired.model);
+		if (!resolved.ok) {
+			debugLog(`${stage}.model_unavailable`, { reason: resolved.reason });
+			if (!runtime.resolveFailureNotified && ctx.hasUI && ctx.ui) {
+				ctx.ui.notify(`Observational memory: ${stage} skipped — ${resolved.reason}`, "warning");
+				runtime.resolveFailureNotified = true;
+			}
+			return undefined;
 		}
-		debugLog(`${stage}.model_unavailable`, { reason: cached.reason });
-		if (!runtime.resolveFailureNotified && ctx.hasUI && ctx.ui) {
-			ctx.ui.notify(`Observational memory: ${stage} skipped — ${cached.reason}`, "warning");
-			runtime.resolveFailureNotified = true;
-		}
-		return undefined;
+		const result: StageResolution = {
+			model: resolved.model,
+			apiKey: resolved.apiKey,
+			headers: resolved.headers,
+			thinking: desired.thinking,
+		};
+		cache.set(stage, result);
+		runtime.resolveFailureNotified = false;
+		return result;
 	};
 }
 
@@ -182,7 +199,7 @@ async function runObserverStage(
 	pi: ExtensionAPI,
 	runtime: Runtime,
 	ctx: ConsolidationCtx,
-	resolveModel: (stage: "observer") => Promise<ResolvedModel | undefined>,
+	resolveModel: (stage: "observer") => Promise<StageResolution | undefined>,
 ): Promise<StageOutcome> {
 	const entries = ctx.sessionManager.getBranch() as Entry[];
 	const tokens = rawTokensSinceObservationCoverage(entries);
@@ -225,7 +242,7 @@ async function runObserverStage(
 		chunk,
 		allowedSourceEntryIds: sourceEntryIds,
 		maxTurns: runtime.config.agentMaxTurns,
-		thinkingLevel: runtime.config.model?.thinking ?? "low",
+		thinkingLevel: resolved.thinking,
 	});
 	if (!observations || observations.length === 0) {
 		debugLog("observer.empty", { coversUpToId });
@@ -256,7 +273,7 @@ async function runReflectorStage(
 	pi: ExtensionAPI,
 	runtime: Runtime,
 	ctx: ConsolidationCtx,
-	resolveModel: (stage: "reflector") => Promise<ResolvedModel | undefined>,
+	resolveModel: (stage: "reflector") => Promise<StageResolution | undefined>,
 ): Promise<ReflectorStageResult> {
 	const entries = ctx.sessionManager.getBranch() as Entry[];
 	const reflectionTokens = rawTokensSinceReflectionCoverage(entries);
@@ -280,7 +297,7 @@ async function runReflectorStage(
 		reflections: folded.reflections,
 		observations: folded.activeObservations,
 		maxTurns: runtime.config.agentMaxTurns,
-		thinkingLevel: runtime.config.model?.thinking ?? "low",
+		thinkingLevel: resolved.thinking,
 	});
 	if (!reflections) return { outcome: "continue", sameRunReflections: [] };
 
@@ -298,7 +315,7 @@ async function runDropperStage(
 	pi: ExtensionAPI,
 	runtime: Runtime,
 	ctx: ConsolidationCtx,
-	resolveModel: (stage: "dropper") => Promise<ResolvedModel | undefined>,
+	resolveModel: (stage: "dropper") => Promise<StageResolution | undefined>,
 	sameRunReflections: Reflection[],
 	sameRunReflectionCoverageId: string | undefined,
 ): Promise<StageOutcome> {
@@ -353,7 +370,7 @@ async function runDropperStage(
 		observations: folded.activeObservations,
 		targetTokens: runtime.config.observationsPoolTargetTokens,
 		maxTurns: runtime.config.agentMaxTurns,
-		thinkingLevel: runtime.config.model?.thinking ?? "low",
+		thinkingLevel: resolved.thinking,
 	});
 	const coversUpToId = earlierCoverageMarkerId(entries, observationCoverageId, sameRunReflectionCoverageId);
 	const data = coversUpToId && droppedIds ? buildObservationsDroppedData(droppedIds, coversUpToId) : undefined;

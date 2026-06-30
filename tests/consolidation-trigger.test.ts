@@ -11,6 +11,7 @@ vi.mock("../src/agents/reflector/agent.js", () => ({ runReflector: mockAgents.ru
 vi.mock("../src/agents/dropper/agent.js", () => ({ runDropper: mockAgents.runDropper }));
 
 import { registerConsolidationTrigger } from "../src/hooks/consolidation-trigger.js";
+import type { StageModelConfig } from "../src/config.js";
 import {
 	OM_OBSERVATIONS_DROPPED,
 	OM_OBSERVATIONS_RECORDED,
@@ -44,6 +45,9 @@ function setup(args: {
 	passive?: boolean;
 	consolidationInFlight?: boolean;
 	appendEntryReturnsId?: boolean;
+	observer?: StageModelConfig;
+	reflector?: StageModelConfig;
+	dropper?: StageModelConfig;
 }) {
 	let entries = [...args.entries];
 	const handlers: Record<string, ((event: unknown, ctx: any) => void) | undefined> = {};
@@ -68,6 +72,9 @@ function setup(args: {
 			observationsPoolTargetTokens: args.observationsPoolTargetTokens ?? Math.floor((args.observationsPoolMaxTokens ?? 100) / 2),
 			agentMaxTurns: 9,
 			model: { provider: "anthropic", id: "memory", thinking: "minimal" },
+			...(args.observer ? { observer: args.observer } : {}),
+			...(args.reflector ? { reflector: args.reflector } : {}),
+			...(args.dropper ? { dropper: args.dropper } : {}),
 		},
 		consolidationInFlight: args.consolidationInFlight ?? false,
 		consolidationPhase: undefined as "observer" | "reflector" | "dropper" | undefined,
@@ -250,6 +257,71 @@ describe("V3 consolidation trigger", () => {
 
 		expect(pi.appendEntry).not.toHaveBeenCalled();
 		expect(ctx.ui.notify).toHaveBeenCalledWith("Observational memory: observer skipped — no model", "warning");
+	});
+
+	it("passes observer and reflector stage thinking overrides to each agent", async () => {
+		mockAgents.runObserver.mockResolvedValueOnce([obsA]);
+		const newRef = reflection("ffffffffffff", ["aaaaaaaaaaaa"]);
+		mockAgents.runReflector.mockResolvedValueOnce([newRef]);
+		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
+		const { fire, runLaunchedWork } = setup({
+			entries,
+			observer: { thinking: "off" },
+			reflector: { thinking: "high" },
+		});
+
+		fire();
+		await runLaunchedWork();
+
+		expect(mockAgents.runObserver).toHaveBeenCalledWith(expect.objectContaining({ thinkingLevel: "off" }));
+		expect(mockAgents.runReflector).toHaveBeenCalledWith(expect.objectContaining({ thinkingLevel: "high" }));
+	});
+
+	it("dropper inherits reflector thinking when dropper thinking is unset", async () => {
+		const newRef = reflection("ffffffffffff", ["aaaaaaaaaaaa"]);
+		mockAgents.runReflector.mockResolvedValueOnce([newRef]);
+		mockAgents.runDropper.mockResolvedValueOnce(["aaaaaaaaaaaa"]);
+		const entries = [
+			textCustomMessage("raw-1", "aaaaaaaa"),
+			observationsRecordedEntry("om-obs", { observations: [obsA], coversUpToId: "raw-1" }),
+			textCustomMessage("raw-2", "bbbbbbbb"),
+		];
+		const { fire, runLaunchedWork } = setup({
+			entries,
+			observeAfterTokens: 999,
+			observationsPoolTargetTokens: 5,
+			reflector: { thinking: "high" },
+		});
+
+		fire();
+		await runLaunchedWork();
+
+		expect(mockAgents.runReflector).toHaveBeenCalledWith(expect.objectContaining({ thinkingLevel: "high" }));
+		expect(mockAgents.runDropper).toHaveBeenCalledWith(expect.objectContaining({ thinkingLevel: "high" }));
+	});
+
+	it("dropper own thinking override beats inherited reflector thinking", async () => {
+		const newRef = reflection("ffffffffffff", ["aaaaaaaaaaaa"]);
+		mockAgents.runReflector.mockResolvedValueOnce([newRef]);
+		mockAgents.runDropper.mockResolvedValueOnce(["aaaaaaaaaaaa"]);
+		const entries = [
+			textCustomMessage("raw-1", "aaaaaaaa"),
+			observationsRecordedEntry("om-obs", { observations: [obsA], coversUpToId: "raw-1" }),
+			textCustomMessage("raw-2", "bbbbbbbb"),
+		];
+		const { fire, runLaunchedWork } = setup({
+			entries,
+			observeAfterTokens: 999,
+			observationsPoolTargetTokens: 5,
+			reflector: { thinking: "high" },
+			dropper: { thinking: "medium" },
+		});
+
+		fire();
+		await runLaunchedWork();
+
+		expect(mockAgents.runReflector).toHaveBeenCalledWith(expect.objectContaining({ thinkingLevel: "high" }));
+		expect(mockAgents.runDropper).toHaveBeenCalledWith(expect.objectContaining({ thinkingLevel: "medium" }));
 	});
 
 	it("re-reads branch so observer append can unblock reflector in the same consolidation run", async () => {

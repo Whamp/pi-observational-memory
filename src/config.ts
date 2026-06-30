@@ -9,6 +9,13 @@ export interface ConfiguredModel {
 	thinking?: ModelThinkingLevel;
 }
 
+export type StageName = "observer" | "reflector" | "dropper";
+
+export interface StageModelConfig {
+	model?: ConfiguredModel;
+	thinking?: ModelThinkingLevel;
+}
+
 export interface Config {
 	observeAfterTokens: number;
 	reflectAfterTokens: number;
@@ -17,6 +24,9 @@ export interface Config {
 	observationsPoolTargetTokens: number;
 	agentMaxTurns: number;
 	model?: ConfiguredModel;
+	observer?: StageModelConfig;
+	reflector?: StageModelConfig;
+	dropper?: StageModelConfig;
 	passive: boolean;
 	debugLog: boolean;
 }
@@ -72,6 +82,15 @@ function normalizeModel(value: unknown): ConfiguredModel | undefined {
 	return model;
 }
 
+function normalizeStageConfig(value: unknown): StageModelConfig | undefined {
+	if (!isRecord(value)) return undefined;
+	const stage: StageModelConfig = {};
+	const model = normalizeModel(value.model);
+	if (model) stage.model = model;
+	if (isThinkingLevel(value.thinking)) stage.thinking = value.thinking;
+	return stage.model !== undefined || stage.thinking !== undefined ? stage : undefined;
+}
+
 function normalizeSettingsConfig(value: Record<string, unknown>): Partial<Config> {
 	const normalized: Partial<Config> = {};
 	const numberKeys = [
@@ -90,6 +109,10 @@ function normalizeSettingsConfig(value: Record<string, unknown>): Partial<Config
 	if (typeof value.debugLog === "boolean") normalized.debugLog = value.debugLog;
 	const model = normalizeModel(value.model);
 	if (model) normalized.model = model;
+	for (const stage of ["observer", "reflector", "dropper"] as const) {
+		const stageConfig = normalizeStageConfig(value[stage]);
+		if (stageConfig) normalized[stage] = stageConfig;
+	}
 	return normalized;
 }
 
@@ -111,6 +134,40 @@ function readNamespacedConfig(path: string): Partial<Config> {
 	} catch {
 		return {};
 	}
+}
+
+/**
+ * Resolve the configured model (ConfiguredModel to look up in the registry) for a stage.
+ * Inheritance: observer/reflector fall back to the shared `model`; dropper falls back to
+ * the reflector's model, then the shared `model`. Returns undefined when no stage or shared
+ * model is set, meaning the session model should be used.
+ */
+export function resolveStageModelConfig(config: Config, stage: StageName): ConfiguredModel | undefined {
+	if (stage === "observer") return config.observer?.model ?? config.model;
+	if (stage === "reflector") return config.reflector?.model ?? config.model;
+	return config.dropper?.model ?? config.reflector?.model ?? config.model;
+}
+
+/**
+ * Resolve the thinking level for a stage.
+ * Inheritance: observer/reflector fall back to the stage model's thinking, then the shared
+ * `model.thinking`, then `low`. Dropper additionally inherits the reflector's resolved
+ * thinking before the shared default.
+ */
+export function resolveStageThinking(config: Config, stage: StageName): ModelThinkingLevel {
+	const shared = config.model?.thinking ?? "low";
+	const reflectorThinking = config.reflector?.thinking ?? config.reflector?.model?.thinking ?? shared;
+	if (stage === "observer") return config.observer?.thinking ?? config.observer?.model?.thinking ?? shared;
+	if (stage === "reflector") return config.reflector?.thinking ?? config.reflector?.model?.thinking ?? shared;
+	return config.dropper?.thinking ?? config.dropper?.model?.thinking ?? reflectorThinking;
+}
+
+/**
+ * Resolve the model and thinking level for a stage as a pair. Pure and testable so the
+ * inheritance rules can be asserted independently of Pi's model registry and auth.
+ */
+export function resolveStageModel(config: Config, stage: StageName): { model?: ConfiguredModel; thinking: ModelThinkingLevel } {
+	return { model: resolveStageModelConfig(config, stage), thinking: resolveStageThinking(config, stage) };
 }
 
 export function loadConfig(cwd: string, env: NodeJS.ProcessEnv = process.env): Config {
