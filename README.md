@@ -208,6 +208,7 @@ A typical config:
     "observeAfterTokens": 10000,
     "reflectAfterTokens": 20000,
     "compactAfterTokens": 81000,
+    "compactionTrigger": "auto",
     "observationsPoolMaxTokens": 20000,
     "observationsPoolTargetTokens": 10000,
     "agentMaxTurns": 16,
@@ -224,13 +225,29 @@ A typical config:
 
 Most users can start with the defaults and tune only if they have a specific reason.
 
+For eval harnesses and `pi -p`, prefer Pi's native auto-compaction timing so Pi can compact and continue inside its own retry path:
+
+```json
+{
+  "observational-memory": {
+    "compactionTrigger": "native"
+  },
+  "compaction": {
+    "enabled": true,
+    "reserveTokens": 50000,
+    "keepRecentTokens": 20000
+  }
+}
+```
+
 ### Defaults
 
 | Setting                     | Default       | Meaning                                                                                           |
 | --------------------------- | ------------- | ------------------------------------------------------------------------------------------------- |
 | `observeAfterTokens`        | `10000`       | Raw/source token threshold for observation runs.                                                  |
 | `reflectAfterTokens`        | `20000`       | Raw/source token threshold for reflection runs; successful reflection creates dropper opportunities. |
-| `compactAfterTokens`        | `81000`       | Raw/source token threshold for proactive auto-compaction.                                         |
+| `compactAfterTokens`        | `81000`       | Raw/source token threshold for proactive extension-triggered compaction when effective trigger is `agentEnd`. |
+| `compactionTrigger`         | `auto`        | `auto`, `native`, or `agentEnd`; controls whether the extension proactively calls `ctx.compact()` or only customizes Pi native compactions. |
 | `observationsPoolMaxTokens` | `20000`       | Observation-token budget used for compaction full-fold pressure.                                  |
 | `observationsPoolTargetTokens` | half of max | Active observation target used by post-reflection dropper maintenance.                            |
 | `agentMaxTurns`             | `16`          | Shared turn cap for background memory-agent loops.                                                |
@@ -264,7 +281,7 @@ For details and tuning guidance, see [`docs/configuration.md`](docs/configuratio
 
 | Surface             | What it does                                                                                                                                    |
 | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/om:status`        | Shows memory counts, plain `+N` / `-N` visible/full drift suffixes, progress clocks, visible and active observation pool pressure, passive/in-flight state, and last worker errors. |
+| `/om:status`        | Shows memory counts, plain `+N` / `-N` visible/full drift suffixes, progress clocks, effective compaction trigger mode, visible and active observation pool pressure, passive/in-flight state, and last worker errors. |
 | `/om:view`          | Shows current visible memory and attempts to copy the rendered memory text to the clipboard.                                                   |
 | `/om:view full`     | Shows the full current memory state for the branch and attempts to copy the rendered memory text to the clipboard.                             |
 | `recall` agent tool | Recovers source evidence for a 12-character observation/reflection id on the current branch. It is not semantic search or a transcript browser. |
@@ -281,13 +298,15 @@ flowchart TD
     Observe[Capture observations]
     Reflect[Distill reflections]
     AgentEnd[agent_end]
-    Trigger[auto-compaction trigger]
+    Trigger[extension auto-compaction trigger]
+    Native[Pi native/manual compaction]
     Compact[session_before_compact]
     Summary[visible memory for Pi]
 
     Turn -->|observation due| Observe
     Turn -->|reflection due| Reflect
-    AgentEnd -->|compactAfterTokens and idle| Trigger --> Compact --> Summary
+    AgentEnd -->|compactAfterTokens and effective trigger agentEnd| Trigger --> Compact --> Summary
+    Native --> Compact
 ```
 
 The high-level lifecycle:
@@ -295,7 +314,7 @@ The high-level lifecycle:
 1. Pi session continues normally.
 2. The extension captures observations from the session as work happens.
 3. Durable reflections are distilled in the background.
-4. When compaction time arrives, Pi receives prepared memory quickly.
+4. When compaction time arrives, Pi receives prepared memory quickly. The extension can trigger compaction after `agent_end`, or it can stay in `native` mode and only customize Pi's own compactions.
 5. The agent continues with a compact but useful view of the work so far.
 
 The important part: compaction does not need to rethink the whole session from scratch.
@@ -331,7 +350,7 @@ What this means in practice:
 | V2 setting                   | V3 setting                                              | What to do                                                                                                                                     |
 | ---------------------------- | ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | `observationThresholdTokens` | `observeAfterTokens`                                    | Rename. Same rough role: observation cadence based on raw/source tokens.                                                                       |
-| `compactionThresholdTokens`  | `compactAfterTokens`                                    | Rename. Same rough role: proactive compaction cadence.                                                                                         |
+| `compactionThresholdTokens`  | `compactAfterTokens`                                    | Rename. Same rough role only when the effective `compactionTrigger` is `agentEnd`; native timing uses Pi's top-level `compaction` settings.       |
 | `reflectionThresholdTokens`  | `reflectAfterTokens`, `observationsPoolMaxTokens`, and/or `observationsPoolTargetTokens` | Split. Use `reflectAfterTokens` for reflection scheduling, `observationsPoolMaxTokens` for compaction full-fold pressure, and `observationsPoolTargetTokens` for dropper active observation maintenance. |
 | `compactionModel`            | `model`                                                 | Move `{ provider, id }` to `model`.                                                                                                            |
 | `thinkingLevel`              | `model.thinking`                                        | Move under `model`.                                                                                                                            |
@@ -368,6 +387,7 @@ V3 equivalent:
     "observeAfterTokens": 10000,
     "reflectAfterTokens": 20000,
     "compactAfterTokens": 81000,
+    "compactionTrigger": "auto",
     "observationsPoolMaxTokens": 20000,
     "observationsPoolTargetTokens": 10000,
     "agentMaxTurns": 12,

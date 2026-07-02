@@ -134,6 +134,93 @@ describe("V3 consolidation trigger", () => {
 		expect(pi.on).toHaveBeenCalledWith("turn_end", expect.any(Function));
 	});
 
+	it("waits for in-flight print-mode consolidation on shutdown before the extension context goes stale", async () => {
+		const recorded = observation("cccccccccccc", { sourceEntryIds: ["raw-1"], tokenCount: 4 });
+		let resolveObserver: ((value: unknown) => void) | undefined;
+		mockAgents.runObserver.mockImplementationOnce(() => new Promise((resolve) => {
+			resolveObserver = resolve;
+		}));
+
+		let entries: TestEntry[] = [textCustomMessage("raw-1", "aaaaaaaa")];
+		const handlers: Record<string, ((event: unknown, ctx: any) => unknown) | undefined> = {};
+		const pi = {
+			on: vi.fn((eventName: string, cb: (event: unknown, ctx: any) => unknown) => {
+				handlers[eventName] = cb;
+			}),
+			appendEntry: vi.fn((customType: string, data: unknown) => {
+				entries = [...entries, { type: "custom", id: `appended-${pi.appendEntry.mock.calls.length}`, parentId: entries.at(-1)?.id ?? null, timestamp: "2026-05-02T10:00:00.000Z", customType, data }];
+			}),
+		};
+		const runtime = {
+			config: {
+				passive: false,
+				debugLog: false,
+				observeAfterTokens: 1,
+				reflectAfterTokens: 999,
+				observationsPoolMaxTokens: 100,
+				observationsPoolTargetTokens: 50,
+				agentMaxTurns: 9,
+				model: { provider: "anthropic", id: "memory", thinking: "minimal" },
+			},
+			consolidationInFlight: false,
+			consolidationPromise: null as Promise<void> | null,
+			consolidationPhase: undefined as "observer" | "reflector" | "dropper" | undefined,
+			resolveFailureNotified: false,
+			lastObserverError: undefined as string | undefined,
+			lastReflectorError: undefined as string | undefined,
+			lastDropperError: undefined as string | undefined,
+			ensureConfig: vi.fn(),
+			resolveModel: vi.fn(async () => ({ ok: true, model: { reasoning: true }, apiKey: "key", headers: { h: "v" } })),
+			launchConsolidationTask: vi.fn((_ctx, work) => {
+				runtime.consolidationInFlight = true;
+				const promise = work().finally(() => {
+					runtime.consolidationInFlight = false;
+					runtime.consolidationPromise = null;
+				});
+				runtime.consolidationPromise = promise;
+				return promise;
+			}),
+			recordConsolidationStageError: vi.fn((ctx, phase: "observer" | "reflector" | "dropper", error: unknown) => {
+				const message = error instanceof Error ? error.message : String(error);
+				if (phase === "observer") runtime.lastObserverError = message;
+				if (phase === "reflector") runtime.lastReflectorError = message;
+				if (phase === "dropper") runtime.lastDropperError = message;
+				ctx.ui?.notify(`Observational memory: ${phase} failed: ${message}`, "warning");
+				return message;
+			}),
+		};
+		registerConsolidationTrigger(pi as any, runtime as any);
+
+		const ctx = {
+			mode: "print",
+			cwd: "/tmp/project",
+			hasUI: false,
+			ui: undefined,
+			model: { provider: "session" },
+			modelRegistry: {},
+			sessionManager: { getBranch: () => entries },
+		};
+		handlers.turn_end?.(undefined, ctx);
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(mockAgents.runObserver).toHaveBeenCalled();
+
+		let shutdownSettled = false;
+		const shutdown = Promise.resolve(handlers.session_shutdown?.({ type: "session_shutdown", reason: "quit" }, ctx)).then(() => {
+			shutdownSettled = true;
+		});
+		await Promise.resolve();
+
+		expect(shutdownSettled).toBe(false);
+		expect(pi.appendEntry).not.toHaveBeenCalled();
+
+		resolveObserver?.([recorded]);
+		await shutdown;
+
+		expect(pi.appendEntry).toHaveBeenCalledWith(OM_OBSERVATIONS_RECORDED, { observations: [recorded], coversUpToId: "raw-1" });
+		expect(runtime.lastObserverError).toBeUndefined();
+	});
+
 	it("does not launch below all thresholds from either entrypoint", () => {
 		const entries = [
 			textCustomMessage("raw-1", "aaaa"),

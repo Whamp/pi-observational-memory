@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerCompactionTrigger } from "../src/hooks/compaction-trigger.js";
 import { compactionEntry, textCustomMessage, type TestEntry } from "./fixtures/session.js";
 
-function captureHandler(args: { compactAfterTokens?: number; passive?: boolean; compactInFlight?: boolean } = {}) {
+function captureHandler(args: { compactAfterTokens?: number; passive?: boolean; compactInFlight?: boolean; compactionTrigger?: "auto" | "native" | "agentEnd" } = {}) {
 	let handler: ((event: unknown, ctx: unknown) => void) | undefined;
 	const pi = {
 		on: vi.fn((name: string, cb: typeof handler) => {
@@ -15,6 +15,7 @@ function captureHandler(args: { compactAfterTokens?: number; passive?: boolean; 
 		ensureConfig: vi.fn(),
 		config: {
 			compactAfterTokens: args.compactAfterTokens ?? 3,
+			compactionTrigger: args.compactionTrigger ?? "auto",
 			passive: args.passive ?? false,
 		},
 		compactInFlight: args.compactInFlight ?? false,
@@ -88,6 +89,52 @@ describe("V3 compaction trigger", () => {
 			"Observational memory: compaction threshold reached (~3 tokens); triggering compaction",
 			"info",
 		);
+	});
+
+	it("native trigger policy never calls extension compaction", async () => {
+		const { handler, runtime } = captureHandler({ compactAfterTokens: 3, compactionTrigger: "native" });
+		const ctx = fakeCtx([dueBranch], { mode: "tui" });
+
+		handler(agentEnd(), ctx);
+		await vi.runAllTimersAsync();
+
+		expect(runtime.compactInFlight).toBe(false);
+		expect(ctx.sessionManager.getBranch).not.toHaveBeenCalled();
+		expect(ctx.compact).not.toHaveBeenCalled();
+	});
+
+	it("agentEnd trigger policy preserves threshold compaction even in print mode", async () => {
+		const { handler, runtime } = captureHandler({ compactAfterTokens: 3, compactionTrigger: "agentEnd" });
+		const ctx = fakeCtx([dueBranch], { mode: "print" });
+
+		handler(agentEnd(), ctx);
+		expect(runtime.compactInFlight).toBe(true);
+		await vi.runAllTimersAsync();
+
+		expect(ctx.compact).toHaveBeenCalledTimes(1);
+	});
+
+	it.each(["print", "json"])("auto trigger policy skips extension compaction in %s mode", async (mode) => {
+		const { handler, runtime } = captureHandler({ compactAfterTokens: 3, compactionTrigger: "auto" });
+		const ctx = fakeCtx([dueBranch], { mode });
+
+		handler(agentEnd(), ctx);
+		await vi.runAllTimersAsync();
+
+		expect(runtime.compactInFlight).toBe(false);
+		expect(ctx.sessionManager.getBranch).not.toHaveBeenCalled();
+		expect(ctx.compact).not.toHaveBeenCalled();
+	});
+
+	it.each(["tui", "rpc"])("auto trigger policy uses agentEnd behavior in %s mode", async (mode) => {
+		const { handler, runtime } = captureHandler({ compactAfterTokens: 3, compactionTrigger: "auto" });
+		const ctx = fakeCtx([dueBranch], { mode });
+
+		handler(agentEnd(), ctx);
+		expect(runtime.compactInFlight).toBe(true);
+		await vi.runAllTimersAsync();
+
+		expect(ctx.compact).toHaveBeenCalledTimes(1);
 	});
 
 	it("skips passive mode", async () => {

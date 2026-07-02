@@ -32,6 +32,7 @@ The extension loads config once for its runtime. After changing settings, restar
     "observeAfterTokens": 10000,
     "reflectAfterTokens": 20000,
     "compactAfterTokens": 81000,
+    "compactionTrigger": "auto",
     "observationsPoolMaxTokens": 20000,
     "observationsPoolTargetTokens": 10000,
     "agentMaxTurns": 16,
@@ -54,7 +55,8 @@ You can omit everything. Defaults work for ordinary sessions, and if `model` is 
 |---|---:|---:|---|
 | `observeAfterTokens` | positive integer | `10000` | Raw/source token threshold for observer runs. |
 | `reflectAfterTokens` | positive integer | `20000` | Raw/source token threshold for reflector runs; successful reflection creates dropper maintenance opportunities. |
-| `compactAfterTokens` | positive integer | `81000` | Raw/source token threshold for proactive auto-compaction. |
+| `compactAfterTokens` | positive integer | `81000` | Raw/source token threshold for proactive extension-triggered compaction when the effective `compactionTrigger` is `agentEnd`. |
+| `compactionTrigger` | `auto`, `native`, or `agentEnd` | `auto` | Whether the extension proactively calls `ctx.compact()` or only customizes Pi native compactions. |
 | `observationsPoolMaxTokens` | positive integer | `20000` | Normal compaction-projection observation-token pressure that makes compaction do a full fold. |
 | `observationsPoolTargetTokens` | positive integer below max | half of `observationsPoolMaxTokens` | Folded active observation target used by post-reflection dropper maintenance. |
 | `agentMaxTurns` | positive integer | `16` | Shared nested-agent turn cap for observer, reflector, and dropper. |
@@ -70,7 +72,7 @@ You can omit everything. Defaults work for ordinary sessions, and if `model` is 
 
 Valid `model.thinking` values are `off`, `minimal`, `low`, `medium`, `high`, and `xhigh`.
 
-Invalid values are ignored. Positive-integer settings must be finite integers greater than zero. `observationsPoolTargetTokens` must also be below `observationsPoolMaxTokens`; if omitted or invalid, it is derived as `Math.floor(observationsPoolMaxTokens / 2)`.
+Invalid values are ignored. Positive-integer settings must be finite integers greater than zero. `compactionTrigger` must be one of `auto`, `native`, or `agentEnd`. `observationsPoolTargetTokens` must also be below `observationsPoolMaxTokens`; if omitted or invalid, it is derived as `Math.floor(observationsPoolMaxTokens / 2)`.
 
 ## `observeAfterTokens`
 
@@ -94,11 +96,40 @@ Lower values distill reflections more often and therefore create more opportunit
 
 Default: `81000`.
 
-The auto-compaction trigger runs from Pi's `agent_end` hook. It counts raw/source tokens after the latest compaction boundary. If the count reaches `compactAfterTokens`, the extension defers with `setTimeout(0)`, checks that Pi is idle, re-checks the threshold, and calls `ctx.compact()`.
+`compactAfterTokens` applies only when the effective `compactionTrigger` is `agentEnd`. In that mode, the proactive extension trigger runs from Pi's `agent_end` hook. It counts raw/source tokens after the latest compaction boundary. If the count reaches `compactAfterTokens`, the extension defers with `setTimeout(0)`, checks that Pi is idle, re-checks the threshold, and calls `ctx.compact()`.
 
 This trigger does not wait for observer, reflector, or dropper work. Actual compaction summary creation happens later in `session_before_compact`, where V3 compaction is deterministic and model-free.
 
-Pi's own window-pressure compaction and manual compaction can still happen independently of this proactive trigger.
+When the effective trigger is `native`, `compactAfterTokens` is ignored and Pi's own top-level `compaction` settings control when compaction happens. Pi's manual compaction also still runs the V3 `session_before_compact` hook.
+
+## `compactionTrigger`
+
+Default: `auto`.
+
+`compactionTrigger` controls only whether this extension proactively calls `ctx.compact()`. It does not disable the V3 compaction hook. The hook still handles every `session_before_compact` event and returns the observational-memory ledger summary for Pi native, manual, and extension-triggered compactions.
+
+Modes:
+
+- `auto`: use Pi native compaction timing in `print` and `json` modes; use the legacy `agent_end` trigger in `tui`, `rpc`, and unknown interactive modes.
+- `native`: never call extension `ctx.compact()` proactively. Pi's native top-level compaction settings decide timing, and V3 only customizes `session_before_compact` summaries.
+- `agentEnd`: preserve the previous proactive behavior exactly: after `agent_end`, if raw/source tokens since the last compaction reach `compactAfterTokens` and Pi is idle, call `ctx.compact()`.
+
+For eval harnesses and `pi -p`, prefer native timing so Pi can use its own auto-compaction-and-continue path:
+
+```json
+{
+  "observational-memory": {
+    "compactionTrigger": "native"
+  },
+  "compaction": {
+    "enabled": true,
+    "reserveTokens": 50000,
+    "keepRecentTokens": 20000
+  }
+}
+```
+
+In that setup, `observational-memory.compactionTrigger` says “do not proactively call `ctx.compact()`,” while Pi's top-level `compaction.reserveTokens` says how early native compaction should fire.
 
 ## `observationsPoolMaxTokens`
 
@@ -257,7 +288,7 @@ V3 is not backwards compatible with V2 settings. Old keys are silently ignored a
 | V2 setting | V3 setting | Migration note |
 |---|---|---|
 | `observationThresholdTokens` | `observeAfterTokens` | Rename. Same rough observer-cadence role. |
-| `compactionThresholdTokens` | `compactAfterTokens` | Rename. Same rough proactive-compaction role. |
+| `compactionThresholdTokens` | `compactAfterTokens` | Rename. Same rough proactive-compaction role only when the effective `compactionTrigger` is `agentEnd`; native timing uses Pi's top-level `compaction` settings. |
 | `reflectionThresholdTokens` | `reflectAfterTokens`, `observationsPoolMaxTokens`, and/or `observationsPoolTargetTokens` | Split. Use `reflectAfterTokens` for reflector cadence, `observationsPoolMaxTokens` for compaction full-fold pressure, and `observationsPoolTargetTokens` for dropper active observation maintenance. |
 | `compactionModel` | `model` | Move `{ provider, id }` under `model`. |
 | `thinkingLevel` | `model.thinking` | Move under `model`. |

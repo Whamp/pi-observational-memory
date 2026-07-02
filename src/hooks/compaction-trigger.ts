@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { resolveEffectiveCompactionTrigger } from "../config.js";
 import { rawTokensSinceLastCompaction, type Entry } from "../session-ledger/index.js";
 import type { Runtime } from "../runtime.js";
 
@@ -15,6 +16,7 @@ export function registerCompactionTrigger(pi: ExtensionAPI, runtime: Runtime): v
 		runtime.ensureConfig(ctx.cwd);
 		if (runtime.config.passive === true) return;
 		if (runtime.compactInFlight) return;
+		if (resolveEffectiveCompactionTrigger(runtime.config, ctx.mode) === "native") return;
 
 		// Don't trigger compaction if Pi will auto-retry — the agent hasn't truly finished.
 		// Pi emits agent_end before its own retry check, so we must detect this ourselves.

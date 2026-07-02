@@ -10,6 +10,8 @@ export interface ConfiguredModel {
 }
 
 export type StageName = "observer" | "reflector" | "dropper";
+export type CompactionTrigger = "auto" | "native" | "agentEnd";
+export type EffectiveCompactionTrigger = Exclude<CompactionTrigger, "auto">;
 
 export interface StageModelConfig {
 	model?: ConfiguredModel;
@@ -23,6 +25,7 @@ export interface Config {
 	observationsPoolMaxTokens: number;
 	observationsPoolTargetTokens: number;
 	agentMaxTurns: number;
+	compactionTrigger: CompactionTrigger;
 	model?: ConfiguredModel;
 	observer?: StageModelConfig;
 	reflector?: StageModelConfig;
@@ -38,11 +41,13 @@ export const DEFAULTS: Config = {
 	observationsPoolMaxTokens: 20_000,
 	observationsPoolTargetTokens: 10_000,
 	agentMaxTurns: 16,
+	compactionTrigger: "auto",
 	passive: false,
 	debugLog: false,
 };
 
 export const THINKING_LEVEL_VALUES: readonly ModelThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+export const COMPACTION_TRIGGER_VALUES: readonly CompactionTrigger[] = ["auto", "native", "agentEnd"] as const;
 
 const SETTINGS_KEY = "observational-memory";
 const PASSIVE_ENV = "PI_OBSERVATIONAL_MEMORY_PASSIVE";
@@ -62,6 +67,10 @@ function derivedObservationPoolTarget(maxTokens: number): number {
 
 function isThinkingLevel(value: unknown): value is ModelThinkingLevel {
 	return typeof value === "string" && (THINKING_LEVEL_VALUES as readonly string[]).includes(value);
+}
+
+function isCompactionTrigger(value: unknown): value is CompactionTrigger {
+	return typeof value === "string" && (COMPACTION_TRIGGER_VALUES as readonly string[]).includes(value);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -107,6 +116,7 @@ function normalizeSettingsConfig(value: Record<string, unknown>): Partial<Config
 	}
 	if (typeof value.passive === "boolean") normalized.passive = value.passive;
 	if (typeof value.debugLog === "boolean") normalized.debugLog = value.debugLog;
+	if (isCompactionTrigger(value.compactionTrigger)) normalized.compactionTrigger = value.compactionTrigger;
 	const model = normalizeModel(value.model);
 	if (model) normalized.model = model;
 	for (const stage of ["observer", "reflector", "dropper"] as const) {
@@ -168,6 +178,15 @@ export function resolveStageThinking(config: Config, stage: StageName): ModelThi
  */
 export function resolveStageModel(config: Config, stage: StageName): { model?: ConfiguredModel; thinking: ModelThinkingLevel } {
 	return { model: resolveStageModelConfig(config, stage), thinking: resolveStageThinking(config, stage) };
+}
+
+export function resolveEffectiveCompactionTrigger(
+	config: Pick<Config, "compactionTrigger">,
+	mode?: string,
+): EffectiveCompactionTrigger {
+	if (config.compactionTrigger === "native") return "native";
+	if (config.compactionTrigger === "agentEnd") return "agentEnd";
+	return mode === "print" || mode === "json" ? "native" : "agentEnd";
 }
 
 export function loadConfig(cwd: string, env: NodeJS.ProcessEnv = process.env): Config {

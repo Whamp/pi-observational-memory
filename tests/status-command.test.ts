@@ -15,7 +15,7 @@ import {
 	type TestEntry,
 } from "./fixtures/session.js";
 
-function setup(args: { entries: TestEntry[]; runtime?: Partial<any> }) {
+function setup(args: { entries: TestEntry[]; runtime?: Partial<any>; mode?: string }) {
 	let handler: ((args: unknown, ctx: any) => Promise<void>) | undefined;
 	const pi = {
 		registerCommand: vi.fn((name: string, command: { handler: typeof handler }) => {
@@ -29,6 +29,7 @@ function setup(args: { entries: TestEntry[]; runtime?: Partial<any> }) {
 			observeAfterTokens: 10,
 			reflectAfterTokens: 20,
 			compactAfterTokens: 30,
+			compactionTrigger: "auto",
 			observationsPoolMaxTokens: 40,
 			observationsPoolTargetTokens: 20,
 			passive: false,
@@ -45,7 +46,7 @@ function setup(args: { entries: TestEntry[]; runtime?: Partial<any> }) {
 	registerStatusCommand(pi as any, runtime as any);
 	if (!handler) throw new Error("status handler not registered");
 	const notify = vi.fn();
-	const ctx = { cwd: "/tmp/project", ui: { notify }, sessionManager: { getBranch: () => args.entries } };
+	const ctx = { cwd: "/tmp/project", mode: args.mode, ui: { notify }, sessionManager: { getBranch: () => args.entries } };
 	const run = async () => {
 		await handler!(undefined, ctx);
 		return notify.mock.calls.at(-1)?.[0] as string;
@@ -134,11 +135,29 @@ describe("V3 /om:status", () => {
 		expect(output).toContain("Active observation pool: ~25 / 20 target tokens (125%)");
 	});
 
+	it("shows compaction trigger policy and effective mode", async () => {
+		const output = await setup({ entries: [], mode: "print" }).run();
+
+		expect(output).toContain("Compaction trigger: auto (effective: native in print mode)");
+		expect(output).toContain("Next compaction: native Pi compaction timing; compactAfterTokens ignored");
+	});
+
+	it("shows configured native mode and compactAfterTokens clarification", async () => {
+		const output = await setup({
+			entries: [],
+			runtime: { config: { observeAfterTokens: 10, reflectAfterTokens: 20, compactAfterTokens: 30, compactionTrigger: "native", observationsPoolMaxTokens: 40, observationsPoolTargetTokens: 20, passive: false } },
+		}).run();
+
+		expect(output).toContain("Compaction trigger: native (effective: native in current mode)");
+		expect(output).toContain("compactAfterTokens ignored");
+		expect(output).not.toContain("/ 30 tokens");
+	});
+
 	it("shows passive mode, consolidation in flight, compaction in flight, and stage-specific last errors", async () => {
 		const output = await setup({
 			entries: [],
 			runtime: {
-				config: { observeAfterTokens: 10, reflectAfterTokens: 20, compactAfterTokens: 30, observationsPoolMaxTokens: 40, observationsPoolTargetTokens: 20, passive: true },
+				config: { observeAfterTokens: 10, reflectAfterTokens: 20, compactAfterTokens: 30, compactionTrigger: "auto", observationsPoolMaxTokens: 40, observationsPoolTargetTokens: 20, passive: true },
 				consolidationInFlight: true,
 				consolidationPhase: "reflector",
 				compactInFlight: true,

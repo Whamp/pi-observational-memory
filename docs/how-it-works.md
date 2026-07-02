@@ -12,8 +12,8 @@ V3 is ledger-centered: memory state is reconstructed by folding V3 ledger entrie
 |---|---|
 | `turn_end` observer trigger | Maybe run the observer in the background. |
 | `turn_end` reflect/drop trigger | Maybe run the due reflector, then run dropper maintenance only after same-run successful reflection. |
-| `agent_end` compaction trigger | Maybe call `ctx.compact()` when idle and over `compactAfterTokens`. |
-| `session_before_compact` hook | Build the V3 compaction payload deterministically. |
+| `agent_end` compaction trigger | Maybe call `ctx.compact()` when effective `compactionTrigger` is `agentEnd`, Pi is idle, and raw/source tokens are over `compactAfterTokens`. |
+| `session_before_compact` hook | Build the V3 compaction payload deterministically for Pi native, manual, and extension-triggered compactions. |
 | `/om:status` | Show ledger counts, drift, progress clocks, and worker state. |
 | `/om:view` | Show visible or full memory content and attempt to copy the rendered memory text. |
 | `recall` tool | Recover source evidence for a memory id. |
@@ -35,8 +35,10 @@ flowchart TD
     Reflector[Reflector model call<br/>append om.reflections.recorded]
     Dropper[Dropper model call<br/>append om.observations.dropped]
 
+    TriggerMode{effective compactionTrigger<br/>agentEnd?}
     CompactDue{raw tokens since compaction<br/>≥ compactAfterTokens<br/>and idle?}
     CompactCall[ctx.compact]
+    Native[Pi native/manual compaction]
 
     Fold[fold/project V3 ledger]
     Render[render deterministic summary]
@@ -51,9 +53,11 @@ flowchart TD
     ReflectorOnly -- yes --> Reflector
     ReflectorOnly -- no --> Dropper
 
-    AE --> CompactDue
+    AE --> TriggerMode
+    TriggerMode -- yes --> CompactDue
     CompactDue -- yes --> CompactCall
     CompactCall --> SBC
+    Native --> SBC
     SBC --> Fold --> Render --> Details
 ```
 
@@ -196,9 +200,15 @@ Reflector no-output and reflector failure skip same-turn dropper. Dropper failur
 
 ## Auto-compaction trigger
 
-The auto-compaction trigger runs on `agent_end`.
+The proactive extension trigger runs on `agent_end` only when the effective `compactionTrigger` is `agentEnd`.
 
-It skips when:
+Effective trigger policy:
+
+- `native`: never call extension `ctx.compact()` proactively.
+- `agentEnd`: use the legacy `agent_end` threshold trigger.
+- `auto`: use `native` in `print` and `json`; use `agentEnd` in `tui`, `rpc`, and unknown interactive modes.
+
+When the effective trigger is `agentEnd`, it skips when:
 
 - `passive` is true;
 - compaction is already in flight;
@@ -208,6 +218,8 @@ It skips when:
 - the threshold is no longer met after the deferred check.
 
 When all checks pass, it calls `ctx.compact()`.
+
+When the effective trigger is `native`, `compactAfterTokens` is ignored and Pi's own top-level compaction settings decide timing. The V3 `session_before_compact` hook still customizes the summary when Pi native or manual compaction happens.
 
 This trigger does not wait for observer, reflector, or dropper promises. That is intentional: background memory work should never make compaction feel stuck.
 

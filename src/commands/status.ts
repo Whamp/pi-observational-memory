@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { observationPoolMetrics } from "../agents/dropper/pool.js";
+import { resolveEffectiveCompactionTrigger } from "../config.js";
 import type { Runtime } from "../runtime.js";
 import {
 	diffProjection,
@@ -33,6 +34,10 @@ function appendSuffixes(line: string, suffixes: (string | undefined)[]): string 
 	return rendered.length > 0 ? `${line} ${rendered.join(" ")}` : line;
 }
 
+function modeLabel(mode: string | undefined): string {
+	return mode ? `${mode} mode` : "current mode";
+}
+
 export function registerStatusCommand(pi: ExtensionAPI, runtime: Runtime): void {
 	pi.registerCommand("om:status", {
 		description: "Show observational memory status",
@@ -61,6 +66,11 @@ export function registerStatusCommand(pi: ExtensionAPI, runtime: Runtime): void 
 			const obsProgress = rawTokensSinceObservationCoverage(entries);
 			const reflectionProgress = rawTokensSinceReflectionCoverage(entries);
 			const compactionProgress = rawTokensSinceLastCompaction(entries);
+			const mode = (ctx as { mode?: string }).mode;
+			const effectiveCompactionTrigger = resolveEffectiveCompactionTrigger(runtime.config, mode);
+			const compactionLine = effectiveCompactionTrigger === "native"
+				? "Next compaction: native Pi compaction timing; compactAfterTokens ignored"
+				: `Next compaction:  ~${compactionProgress.toLocaleString()} / ${runtime.config.compactAfterTokens.toLocaleString()} tokens (${pct(compactionProgress, runtime.config.compactAfterTokens)}%)`;
 
 			const passiveLines = runtime.config.passive === true
 				? [
@@ -77,9 +87,10 @@ export function registerStatusCommand(pi: ExtensionAPI, runtime: Runtime): void 
 				reflectionLine,
 				"",
 				"── Activity ──",
+				`Compaction trigger: ${runtime.config.compactionTrigger} (effective: ${effectiveCompactionTrigger} in ${modeLabel(mode)})`,
 				`Next observation: ~${obsProgress.toLocaleString()} / ${runtime.config.observeAfterTokens.toLocaleString()} tokens (${pct(obsProgress, runtime.config.observeAfterTokens)}%)`,
 				`Next reflection:  ~${reflectionProgress.toLocaleString()} / ${runtime.config.reflectAfterTokens.toLocaleString()} tokens (${pct(reflectionProgress, runtime.config.reflectAfterTokens)}%)`,
-				`Next compaction:  ~${compactionProgress.toLocaleString()} / ${runtime.config.compactAfterTokens.toLocaleString()} tokens (${pct(compactionProgress, runtime.config.compactAfterTokens)}%)`,
+				compactionLine,
 				`Visible observation pool: ~${visibleObservationTokens.toLocaleString()} / ${runtime.config.observationsPoolMaxTokens.toLocaleString()} tokens (${pct(visibleObservationTokens, runtime.config.observationsPoolMaxTokens)}%)`,
 				`Active observation pool: ~${activeObservationPool.observationTokens.toLocaleString()} / ${runtime.config.observationsPoolTargetTokens.toLocaleString()} target tokens (${pct(activeObservationPool.observationTokens, runtime.config.observationsPoolTargetTokens)}%)`,
 				`Reflection pool:         ~${visibleReflectionTokens.toLocaleString()} tokens`,

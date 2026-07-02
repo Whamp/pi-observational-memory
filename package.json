@@ -31,7 +31,8 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "prototype:auto-compaction": "node src/hooks/__prototype_auto_compaction_continue.mjs"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",

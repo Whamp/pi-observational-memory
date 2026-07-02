@@ -37,6 +37,7 @@ type StageResolution = {
 };
 
 type ConsolidationCtx = {
+	mode?: string;
 	cwd: string;
 	hasUI: boolean;
 	ui?: { notify: (message: string, type?: "warning" | "info" | "error") => void };
@@ -113,12 +114,28 @@ function makeModelResolver(runtime: Runtime, ctx: ConsolidationCtx): (stage: Sta
 	};
 }
 
+function shouldFlushConsolidationOnShutdown(ctx: ConsolidationCtx): boolean {
+	return ctx.mode === "print" || ctx.mode === "json";
+}
+
+async function waitForPendingConsolidation(runtime: Runtime): Promise<void> {
+	const pending = runtime.consolidationPromise;
+	if (!pending) return;
+	await pending.catch(() => undefined);
+}
+
 export function registerConsolidationTrigger(pi: ExtensionAPI, runtime: Runtime): void {
 	const launch = (_event: unknown, ctx: ConsolidationCtx) => {
 		maybeLaunchConsolidation(pi, runtime, ctx);
 	};
 	pi.on("agent_start", launch);
 	pi.on("turn_end", launch);
+	pi.on("session_shutdown", async (_event: unknown, ctx: ConsolidationCtx) => {
+		// Print/json mode disposes the session as soon as the prompt returns; wait while
+		// pi.appendEntry is still valid so memory entries are not lost as stale-context errors.
+		if (!shouldFlushConsolidationOnShutdown(ctx)) return;
+		await waitForPendingConsolidation(runtime);
+	});
 }
 
 function debugSessionMetadata(ctx: ConsolidationCtx): { sessionId?: string; sessionFile?: string } {
