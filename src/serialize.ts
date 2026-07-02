@@ -102,9 +102,15 @@ export const MAX_RECORD_CONTENT_CHARS = 10_000;
 
 export function truncateRecordContent(content: string): string {
 	if (content.length <= MAX_RECORD_CONTENT_CHARS) return content;
-	const head = content.slice(0, MAX_RECORD_CONTENT_CHARS);
-	const dropped = content.length - MAX_RECORD_CONTENT_CHARS;
-	return `${head} … [truncated ${dropped} chars]`;
+
+	let headLength = MAX_RECORD_CONTENT_CHARS;
+	while (true) {
+		const dropped = content.length - headLength;
+		const suffix = ` … [truncated ${dropped} chars]`;
+		const nextHeadLength = Math.max(0, MAX_RECORD_CONTENT_CHARS - suffix.length);
+		if (nextHeadLength === headLength) return `${content.slice(0, headLength)}${suffix}`;
+		headLength = nextHeadLength;
+	}
 }
 
 export type RenderableEntry = {
