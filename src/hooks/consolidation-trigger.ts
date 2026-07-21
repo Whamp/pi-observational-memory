@@ -282,14 +282,18 @@ async function runObserverStage(
 
 	if (result.outcome === "empty") {
 		const data = buildObserverCompletedData(coversUpToId);
-		if (!data) return "continue";
+		if (!data) {
+			return "continue";
+		}
 		appendEntry(pi, OM_OBSERVER_COMPLETED, data);
 		runtime.lastObserverError = undefined;
 		debugLog("observer.empty.appended", { coversUpToId });
-		if (shouldNotifyWorker(runtime, ctx)) ctx.ui?.notify(
-			"Observational memory: observer found no new observations",
-			"info",
-		);
+		if (shouldNotifyWorker(runtime, ctx)) {
+			ctx.ui?.notify(
+				"Observational memory: observer found no new observations",
+				"info",
+			);
+		}
 		return "continue";
 	}
 

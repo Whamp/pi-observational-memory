@@ -98,16 +98,18 @@ describe("session-ledger V3 folding", () => {
 		expect(folded.activeObservations).toEqual([]);
 	});
 
-	it("keeps Empty completion metadata out of folded memory", () => {
+	it("keeps Empty completion metadata out of folded memory without hiding recorded memory", () => {
+		const recorded = observation("aaaaaaaaaaaa", { sourceEntryIds: ["raw-1"] });
 		const entries = [
 			textCustomMessage("raw-1", "aaaa"),
+			observationsRecordedEntry("om-recorded", { observations: [recorded], coversUpToId: "raw-1" }),
 			observerCompletedEntry("om-empty", { outcome: "empty", coversUpToId: "raw-1" }),
 		];
 
 		const folded = foldLedger(entries);
 
-		expect(folded.observations).toEqual([]);
-		expect(folded.activeObservations).toEqual([]);
+		expect(folded.observations).toEqual([recorded]);
+		expect(folded.activeObservations).toEqual([recorded]);
 		expect(folded.reflections).toEqual([]);
 	});
 

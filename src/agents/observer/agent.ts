@@ -93,7 +93,9 @@ export function normalizeSourceEntryIds(
 export async function runObserver(args: RunObserverArgs): Promise<ObserverOutcome> {
 	const { model, apiKey, headers, priorReflections, priorObservations, chunk, allowedSourceEntryIds, signal } = args;
 	const conversation = chunk.trim();
-	if (!conversation) return { outcome: "failed", reason: "no_structured_outcome" };
+	if (!conversation) {
+		return { outcome: "failed", reason: "no_structured_outcome" };
+	}
 
 	const accumulated = new Map<string, Observation>();
 	let rejectedCount = 0;
@@ -111,7 +113,9 @@ export async function runObserver(args: RunObserverArgs): Promise<ObserverOutcom
 			let added = 0;
 			let duplicates = 0;
 			let rejected = 0;
-			if (params.observations.length === 0) explicitlyEmpty = true;
+			if (params.observations.length === 0) {
+				explicitlyEmpty = true;
+			}
 			for (const obs of params.observations) {
 				const sourceEntryIds = normalizeSourceEntryIds(obs.sourceEntryIds, allowedSourceEntryIds);
 				if (!sourceEntryIds) {
@@ -205,8 +209,14 @@ ${conversation}`;
 	}
 	await stream.result();
 
-	if (accumulated.size > 0) return { outcome: "recorded", observations: Array.from(accumulated.values()) };
-	if (rejectedCount > 0) return { outcome: "failed", reason: "rejected_proposals", rejectedCount };
-	if (explicitlyEmpty) return { outcome: "empty" };
+	if (accumulated.size > 0) {
+		return { outcome: "recorded", observations: Array.from(accumulated.values()) };
+	}
+	if (rejectedCount > 0) {
+		return { outcome: "failed", reason: "rejected_proposals", rejectedCount };
+	}
+	if (explicitlyEmpty) {
+		return { outcome: "empty" };
+	}
 	return { outcome: "failed", reason: "no_structured_outcome" };
 }

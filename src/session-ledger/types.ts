@@ -126,7 +126,9 @@ export function isReflection(value: unknown): value is Reflection {
 
 /** Returns whether a value is a valid Empty observer completion payload. */
 export function isObserverCompletedData(value: unknown): value is ObserverCompletedEntryData {
-	if (!isPlainRecord(value)) return false;
+	if (!isPlainRecord(value)) {
+		return false;
+	}
 	return value.outcome === "empty" && isNonEmptyString(value.coversUpToId);
 }
 
@@ -203,7 +205,9 @@ export function isObservationsDroppedEntry(entry: Entry): entry is Entry & {
 
 /** Builds an Empty observer completion payload for a covered source boundary. */
 export function buildObserverCompletedData(coversUpToId: string): ObserverCompletedEntryData | undefined {
-	if (!isNonEmptyString(coversUpToId)) return undefined;
+	if (!isNonEmptyString(coversUpToId)) {
+		return undefined;
+	}
 	return { outcome: "empty", coversUpToId };
 }
 

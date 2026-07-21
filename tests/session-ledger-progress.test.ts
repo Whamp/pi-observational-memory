@@ -148,7 +148,7 @@ describe("session-ledger V3 progress helpers", () => {
 		expect(latestCoverageIndex(entries, V3_REFLECTIONS_RECORDED)).toBe(-1);
 	});
 
-	it("ignores malformed and orphaned Empty markers without advancing Observation Coverage", () => {
+	it("ignores malformed, orphaned, and non-source Empty markers without advancing Observation Coverage", () => {
 		const entries = [
 			textCustomMessage("raw-1", "aaaa"),
 			observerCompletedEntry("om-empty-wrong-outcome", { outcome: "empty", coversUpToId: "raw-1" }, {
@@ -158,6 +158,8 @@ describe("session-ledger V3 progress helpers", () => {
 				data: { outcome: "empty", coversUpToId: "" },
 			}),
 			observerCompletedEntry("om-empty-orphan", { outcome: "empty", coversUpToId: "missing" }),
+			compactionEntry("cmp-1"),
+			observerCompletedEntry("om-empty-non-source", { outcome: "empty", coversUpToId: "cmp-1" }),
 			textCustomMessage("raw-2", "bbbbbbbb"),
 		];
 

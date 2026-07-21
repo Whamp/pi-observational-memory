@@ -90,7 +90,9 @@ describe("runObserver", () => {
 		const result = await runObserver({ ...baseArgs, agentLoop: loop });
 
 		expect(result.outcome).toBe("recorded");
-		if (result.outcome !== "recorded") return;
+		if (result.outcome !== "recorded") {
+			return;
+		}
 		expect(result.observations).toHaveLength(1);
 		expect(result.observations[0]).toMatchObject({
 			content,
@@ -130,7 +132,9 @@ describe("runObserver", () => {
 		const result = await runObserver({ ...baseArgs, agentLoop: loop });
 
 		expect(result.outcome).toBe("recorded");
-		if (result.outcome !== "recorded") return;
+		if (result.outcome !== "recorded") {
+			return;
+		}
 		expect(result.observations.map((item) => item.content)).toEqual(["Accepted"]);
 	});
 
@@ -162,7 +166,9 @@ describe("runObserver", () => {
 		const result = await runObserver({ ...baseArgs, agentLoop: loop });
 
 		expect(result.outcome).toBe("recorded");
-		if (result.outcome !== "recorded") return;
+		if (result.outcome !== "recorded") {
+			return;
+		}
 		expect(result.observations).toHaveLength(1);
 		expect(result.observations[0].content).toBe("Same content");
 	});
@@ -173,6 +179,16 @@ describe("runObserver", () => {
 			outcome: "failed",
 			reason: "no_structured_outcome",
 		});
+	});
+
+	it("reports Failed for a blank chunk without invoking the agent loop", async () => {
+		const loop = vi.fn(fakeAgentLoop(() => {}));
+
+		await expect(runObserver({ ...baseArgs, chunk: "   ", agentLoop: loop })).resolves.toEqual({
+			outcome: "failed",
+			reason: "no_structured_outcome",
+		});
+		expect(loop).not.toHaveBeenCalled();
 	});
 
 	it("uses maxTurns as an observer turn cap", async () => {

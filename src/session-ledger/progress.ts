@@ -39,7 +39,9 @@ function isValidCoverageEntry(entry: Entry, customType: CoverageCustomType): ent
 	if (entry.type !== "custom" || entry.customType !== customType) return false;
 	if (!isObject(entry.data) || typeof entry.data.coversUpToId !== "string") return false;
 
-	if (customType === OM_OBSERVER_COMPLETED) return isObserverCompletedData(entry.data);
+	if (customType === OM_OBSERVER_COMPLETED) {
+		return isObserverCompletedData(entry.data);
+	}
 	if (customType === OM_OBSERVATIONS_RECORDED) return isNonEmptyArray(entry.data.observations);
 	if (customType === OM_REFLECTIONS_RECORDED) return isNonEmptyArray(entry.data.reflections);
 	return isNonEmptyArray(entry.data.observationIds);
@@ -53,6 +55,9 @@ export function latestCoverageIndex(entries: Entry[], customType: CoverageCustom
 		if (!isValidCoverageEntry(entry, customType)) continue;
 		const coveredIndex = idToIndex.get(entry.data.coversUpToId);
 		if (coveredIndex === undefined) continue;
+		if (customType === OM_OBSERVER_COMPLETED && !isSourceEntry(entries[coveredIndex])) {
+			continue;
+		}
 		if (coveredIndex > latest) latest = coveredIndex;
 	}
 
@@ -68,6 +73,9 @@ export function latestCoverageMarkerId(entries: Entry[], customType: CoverageCus
 		if (!isValidCoverageEntry(entry, customType)) continue;
 		const coveredIndex = idToIndex.get(entry.data.coversUpToId);
 		if (coveredIndex === undefined) continue;
+		if (customType === OM_OBSERVER_COMPLETED && !isSourceEntry(entries[coveredIndex])) {
+			continue;
+		}
 		if (coveredIndex > latestIndex) {
 			latestIndex = coveredIndex;
 			latestMarkerId = entry.data.coversUpToId;

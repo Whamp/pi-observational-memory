@@ -385,19 +385,28 @@ describe("V3 consolidation trigger", () => {
 		expect(mockAgents.runObserver).toHaveBeenCalledTimes(1);
 	});
 
-	it("observer no-output appends nothing and does not fake observation coverage", async () => {
+	it("keeps silent observer failures uncovered, visible, ungated, and immediately retryable", async () => {
 		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
-		const { fire, runLaunchedWork, pi } = setup({ entries });
+		const result = setup({ entries, showWorkerNotifications: false, reflectAfterTokens: 999 });
 
-		fire();
-		await runLaunchedWork();
+		result.fire();
+		await result.runLaunchedWork();
+		result.runtime.consolidationInFlight = false;
+		result.fire();
+		await result.runLaunchedWork();
 
-		expect(pi.appendEntry).not.toHaveBeenCalled();
+		expect(mockAgents.runObserver).toHaveBeenCalledTimes(2);
+		expect(result.pi.appendEntry).not.toHaveBeenCalled();
+		expect(result.runtime.lastObserverError).toBe("observer reported no structured outcome");
+		expect(result.ctx.ui.notify).toHaveBeenCalledWith(
+			"Observational memory: observer failed: observer reported no structured outcome",
+			"warning",
+		);
 		expect(mockAgents.runReflector).not.toHaveBeenCalled();
 		expect(mockAgents.runDropper).not.toHaveBeenCalled();
 	});
 
-	it("keeps Failed outcomes uncovered, visible, and immediately retryable", async () => {
+	it("keeps rejected observer failures uncovered, visible, ungated, and immediately retryable", async () => {
 		mockAgents.runObserver.mockResolvedValue({ outcome: "failed", reason: "rejected_proposals", rejectedCount: 2 });
 		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
 		const result = setup({ entries, showWorkerNotifications: false, reflectAfterTokens: 999 });
@@ -417,18 +426,26 @@ describe("V3 consolidation trigger", () => {
 		);
 	});
 
-	it("keeps the observer no-output warning when routine notifications are hidden", async () => {
+	it("keeps thrown observer failures uncovered, visible, ungated, and immediately retryable", async () => {
+		mockAgents.runObserver.mockRejectedValue(new Error("observe failed"));
 		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
-		const { fire, runLaunchedWork, ctx } = setup({ entries, showWorkerNotifications: false });
+		const result = setup({ entries, showWorkerNotifications: false, reflectAfterTokens: 999 });
 
-		fire();
-		await runLaunchedWork();
+		result.fire();
+		await result.runLaunchedWork();
+		result.runtime.consolidationInFlight = false;
+		result.fire();
+		await result.runLaunchedWork();
 
-		expect(ctx.ui.notify).toHaveBeenCalledTimes(1);
-		expect(ctx.ui.notify).toHaveBeenCalledWith(
-			"Observational memory: observer failed: observer reported no structured outcome",
+		expect(mockAgents.runObserver).toHaveBeenCalledTimes(2);
+		expect(result.pi.appendEntry).not.toHaveBeenCalled();
+		expect(result.runtime.lastObserverError).toBe("observe failed");
+		expect(result.ctx.ui.notify).toHaveBeenCalledWith(
+			"Observational memory: observer failed: observe failed",
 			"warning",
 		);
+		expect(mockAgents.runReflector).not.toHaveBeenCalled();
+		expect(mockAgents.runDropper).not.toHaveBeenCalled();
 	});
 
 	it("model resolution failure skips appending and notifies once", async () => {
