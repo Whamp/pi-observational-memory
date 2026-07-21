@@ -208,6 +208,8 @@ A typical config:
     "observeAfterTokens": 10000,
     "reflectAfterTokens": 20000,
     "compactAfterTokens": 81000,
+    "compactAfterTokensMode": "calibrated",
+    "compactAfterTokensRatio": 0.68,
     "compactionTrigger": "auto",
     "observationsPoolMaxTokens": 20000,
     "observationsPoolTargetTokens": 10000,
@@ -225,6 +227,8 @@ A typical config:
 
 Most users can start with the defaults and tune only if they have a specific reason.
 
+### Choosing who triggers compaction
+
 For eval harnesses and `pi -p`, prefer Pi's native auto-compaction timing so Pi can compact and continue inside its own retry path:
 
 ```json
@@ -240,13 +244,55 @@ For eval harnesses and `pi -p`, prefer Pi's native auto-compaction timing so Pi 
 }
 ```
 
+When the effective trigger is `native`, the extension does not use `compactAfterTokens`, `compactAfterTokensMode`, or `compactAfterTokensRatio` to initiate compaction.
+
+### Scaling extension-triggered compaction to the model's context window
+
+By default `compactAfterTokensMode` is `"calibrated"`, so extension-triggered
+compaction fires at the fixed `compactAfterTokens` value (81,000 by default).
+That is backwards-compatible and works well for typical ~128K–200K context
+models.
+
+On a large-context model (e.g. 1M tokens) the calibrated default preempts
+compaction at ~81K, wasting most of the window. When the effective trigger is
+`agentEnd`, switch to `"ratio"` mode to scale the threshold with the active
+model's `contextWindow`:
+
+```json
+{
+  "observational-memory": {
+    "compactAfterTokens": 81000,
+    "compactAfterTokensMode": "ratio",
+    "compactAfterTokensRatio": 0.5
+  }
+}
+```
+
+In ratio mode the effective threshold is
+`floor(model.contextWindow * compactAfterTokensRatio)` (clamped to a minimum of
+1). With the example above, a 1,000,000-token window compacts at ~500,000 raw
+tokens; a 200,000-token window compacts at ~100,000.
+
+`compactAfterTokensRatio` is user-tunable precisely because **context window ≠
+attention**. Some models advertise a large window but degrade at long range; set
+a lower ratio (e.g. `0.4`) to compact earlier on those, or a higher ratio
+(e.g. `0.7`) on models that stay sharp. The default ratio is `0.68`.
+
+`compactAfterTokens` is retained as the fallback: in `"calibrated"` mode it is
+the threshold directly, and in `"ratio"` mode it is used whenever the active
+model's `contextWindow` is unavailable (undefined, 0, or negative), so
+compaction still triggers safely. `/om:status` shows the resolved threshold when
+the extension owns compaction timing.
+
 ### Defaults
 
 | Setting                     | Default       | Meaning                                                                                           |
 | --------------------------- | ------------- | ------------------------------------------------------------------------------------------------- |
 | `observeAfterTokens`        | `10000`       | Raw/source token threshold for observation runs.                                                  |
 | `reflectAfterTokens`        | `20000`       | Raw/source token threshold for reflection runs; successful reflection creates dropper opportunities. |
-| `compactAfterTokens`        | `81000`       | Raw/source token threshold for proactive extension-triggered compaction when effective trigger is `agentEnd`. |
+| `compactAfterTokens`        | `81000`       | Raw/source token threshold for extension-triggered compaction when effective trigger is `agentEnd`; used directly in `"calibrated"` mode and as the fallback in `"ratio"` mode. |
+| `compactAfterTokensMode`    | `"calibrated"`| `"calibrated"` uses `compactAfterTokens` directly. `"ratio"` scales the threshold by the active model's `contextWindow`. Ignored when the effective trigger is `native`. |
+| `compactAfterTokensRatio`   | `0.68`        | In `"ratio"` mode, the threshold is `floor(contextWindow * ratio)`. Must be in `(0, 1)`. |
 | `compactionTrigger`         | `auto`        | `auto`, `native`, or `agentEnd`; controls whether the extension proactively calls `ctx.compact()` or only customizes Pi native compactions. |
 | `observationsPoolMaxTokens` | `20000`       | Observation-token budget used for compaction full-fold pressure.                                  |
 | `observationsPoolTargetTokens` | half of max | Active observation target used by post-reflection dropper maintenance.                            |

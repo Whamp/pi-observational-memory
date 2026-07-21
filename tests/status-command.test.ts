@@ -15,7 +15,7 @@ import {
 	type TestEntry,
 } from "./fixtures/session.js";
 
-function setup(args: { entries: TestEntry[]; runtime?: Partial<any>; mode?: string }) {
+function setup(args: { entries: TestEntry[]; runtime?: Partial<any>; mode?: string; model?: unknown }) {
 	let handler: ((args: unknown, ctx: any) => Promise<void>) | undefined;
 	const pi = {
 		registerCommand: vi.fn((name: string, command: { handler: typeof handler }) => {
@@ -46,7 +46,7 @@ function setup(args: { entries: TestEntry[]; runtime?: Partial<any>; mode?: stri
 	registerStatusCommand(pi as any, runtime as any);
 	if (!handler) throw new Error("status handler not registered");
 	const notify = vi.fn();
-	const ctx = { cwd: "/tmp/project", mode: args.mode, ui: { notify }, sessionManager: { getBranch: () => args.entries } };
+	const ctx = { cwd: "/tmp/project", mode: args.mode, ui: { notify }, sessionManager: { getBranch: () => args.entries }, model: args.model };
 	const run = async () => {
 		await handler!(undefined, ctx);
 		return notify.mock.calls.at(-1)?.[0] as string;
@@ -184,5 +184,93 @@ describe("V3 /om:status", () => {
 
 		expect(output).toContain("Consolidation: running");
 		expect(output).not.toContain("Consolidation: running (");
+	});
+
+	describe("ratio mode", () => {
+		it("reports native timing instead of a ratio threshold when native mode is configured", async () => {
+			const output = await setup({
+				entries: [],
+				runtime: {
+					config: {
+						observeAfterTokens: 10,
+						reflectAfterTokens: 20,
+						compactAfterTokens: 30,
+						compactAfterTokensMode: "ratio",
+						compactAfterTokensRatio: 0.5,
+						compactionTrigger: "native",
+						observationsPoolMaxTokens: 40,
+						observationsPoolTargetTokens: 20,
+						passive: false,
+					},
+				},
+				model: { contextWindow: 1_000_000 },
+			}).run();
+
+			expect(output).toContain("Next compaction: native Pi compaction timing; compactAfterTokens ignored");
+			expect(output).not.toContain("500,000 tokens");
+		});
+
+		it("shows the context-window-scaled threshold in the Next compaction line", async () => {
+			const output = await setup({
+				entries: [],
+				runtime: {
+					config: {
+						observeAfterTokens: 10,
+						reflectAfterTokens: 20,
+						compactAfterTokens: 30,
+						compactAfterTokensMode: "ratio",
+						compactAfterTokensRatio: 0.5,
+						observationsPoolMaxTokens: 40,
+						observationsPoolTargetTokens: 20,
+						passive: false,
+					},
+				},
+				model: { contextWindow: 1_000_000 },
+			}).run();
+
+			expect(output).toContain("Next compaction:  ~0 / 500,000 tokens (0%)");
+		});
+
+		it("falls back to calibrated threshold when model is unavailable in ratio mode", async () => {
+			const output = await setup({
+				entries: [],
+				runtime: {
+					config: {
+						observeAfterTokens: 10,
+						reflectAfterTokens: 20,
+						compactAfterTokens: 30,
+						compactAfterTokensMode: "ratio",
+						compactAfterTokensRatio: 0.5,
+						observationsPoolMaxTokens: 40,
+						observationsPoolTargetTokens: 20,
+						passive: false,
+					},
+				},
+				model: undefined,
+			}).run();
+
+			expect(output).toContain("Next compaction:  ~0 / 30 tokens (0%)");
+		});
+
+		it("falls back to calibrated threshold when contextWindow is zero in ratio mode", async () => {
+			const output = await setup({
+				entries: [],
+				runtime: {
+					config: {
+						observeAfterTokens: 10,
+						reflectAfterTokens: 20,
+						compactAfterTokens: 30,
+						compactAfterTokensMode: "ratio",
+						compactAfterTokensRatio: 0.5,
+						observationsPoolMaxTokens: 40,
+						observationsPoolTargetTokens: 20,
+						passive: false,
+					},
+				},
+				model: { contextWindow: 0 },
+			}).run();
+
+			expect(output).toContain("Next compaction:  ~0 / 30 tokens (0%)");
+		});
 	});
 });

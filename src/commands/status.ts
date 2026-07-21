@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { observationPoolMetrics } from "../agents/dropper/pool.js";
-import { resolveEffectiveCompactionTrigger } from "../config.js";
+import { resolveCompactAfterTokens, resolveEffectiveCompactionTrigger } from "../config.js";
 import type { Runtime } from "../runtime.js";
 import {
 	diffProjection,
@@ -68,9 +68,11 @@ export function registerStatusCommand(pi: ExtensionAPI, runtime: Runtime): void 
 			const compactionProgress = rawTokensSinceLastCompaction(entries);
 			const mode = (ctx as { mode?: string }).mode;
 			const effectiveCompactionTrigger = resolveEffectiveCompactionTrigger(runtime.config, mode);
+			const contextWindow = typeof ctx.model?.contextWindow === "number" ? ctx.model.contextWindow : undefined;
+			const compactThreshold = resolveCompactAfterTokens(runtime.config, contextWindow);
 			const compactionLine = effectiveCompactionTrigger === "native"
 				? "Next compaction: native Pi compaction timing; compactAfterTokens ignored"
-				: `Next compaction:  ~${compactionProgress.toLocaleString()} / ${runtime.config.compactAfterTokens.toLocaleString()} tokens (${pct(compactionProgress, runtime.config.compactAfterTokens)}%)`;
+				: `Next compaction:  ~${compactionProgress.toLocaleString()} / ${compactThreshold.toLocaleString()} tokens (${pct(compactionProgress, compactThreshold)}%)`;
 
 			const passiveLines = runtime.config.passive === true
 				? [

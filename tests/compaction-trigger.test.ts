@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerCompactionTrigger } from "../src/hooks/compaction-trigger.js";
 import { compactionEntry, textCustomMessage, type TestEntry } from "./fixtures/session.js";
 
-function captureHandler(args: { compactAfterTokens?: number; passive?: boolean; compactInFlight?: boolean; compactionTrigger?: "auto" | "native" | "agentEnd" } = {}) {
+function captureHandler(args: { compactAfterTokens?: number; compactAfterTokensMode?: "calibrated" | "ratio"; compactAfterTokensRatio?: number; passive?: boolean; compactInFlight?: boolean; compactionTrigger?: "auto" | "native" | "agentEnd" } = {}) {
 	let handler: ((event: unknown, ctx: unknown) => void) | undefined;
 	const pi = {
 		on: vi.fn((name: string, cb: typeof handler) => {
@@ -15,6 +15,8 @@ function captureHandler(args: { compactAfterTokens?: number; passive?: boolean; 
 		ensureConfig: vi.fn(),
 		config: {
 			compactAfterTokens: args.compactAfterTokens ?? 3,
+			compactAfterTokensMode: args.compactAfterTokensMode ?? "calibrated",
+			compactAfterTokensRatio: args.compactAfterTokensRatio ?? 0.68,
 			compactionTrigger: args.compactionTrigger ?? "auto",
 			passive: args.passive ?? false,
 		},
@@ -49,6 +51,7 @@ function fakeCtx(branches: TestEntry[][], overrides: Record<string, unknown> = {
 		ui: { notify: vi.fn() },
 		isIdle: vi.fn(() => true),
 		compact: vi.fn(),
+		model: undefined,
 		...overrides,
 	};
 }
@@ -226,5 +229,103 @@ describe("V3 compaction trigger", () => {
 		await vi.runAllTimersAsync();
 
 		expect(ctx.compact).toHaveBeenCalledTimes(1);
+	});
+
+	describe("ratio mode", () => {
+		it("does not override native compaction timing", async () => {
+			const { handler, runtime } = captureHandler({
+				compactAfterTokens: 1,
+				compactAfterTokensMode: "ratio",
+				compactAfterTokensRatio: 0.5,
+				compactionTrigger: "native",
+			});
+			const ctx = fakeCtx([dueBranch], { mode: "tui", model: { contextWindow: 4 } });
+
+			handler(agentEnd(), ctx);
+			await vi.runAllTimersAsync();
+
+			expect(runtime.compactInFlight).toBe(false);
+			expect(ctx.sessionManager.getBranch).not.toHaveBeenCalled();
+			expect(ctx.compact).not.toHaveBeenCalled();
+		});
+
+		it("scales the compaction threshold by model.contextWindow", async () => {
+			// 3 tokens raw; ratio 0.5 of 4-token window = 2 -> threshold 2, so 3 >= 2 fires.
+			const { handler } = captureHandler({
+				compactAfterTokens: 81000,
+				compactAfterTokensMode: "ratio",
+				compactAfterTokensRatio: 0.5,
+			});
+			const ctx = fakeCtx([dueBranch], { model: { contextWindow: 4 } });
+
+			handler(agentEnd(), ctx);
+			await vi.runAllTimersAsync();
+
+			expect(ctx.compact).toHaveBeenCalledTimes(1);
+		});
+
+		it("does not compact when raw tokens are below the scaled threshold", async () => {
+			// 1 token raw (belowBranch); ratio 0.5 of 4 = 2 -> threshold 2, so 1 < 2 does not fire.
+			const { handler } = captureHandler({
+				compactAfterTokens: 81000,
+				compactAfterTokensMode: "ratio",
+				compactAfterTokensRatio: 0.5,
+			});
+			const ctx = fakeCtx([belowBranch], { model: { contextWindow: 4 } });
+
+			handler(agentEnd(), ctx);
+			await vi.runAllTimersAsync();
+
+			expect(ctx.compact).not.toHaveBeenCalled();
+		});
+
+		it("falls back to calibrated value when model.contextWindow is unavailable", async () => {
+			// ratio mode but no model -> falls back to compactAfterTokens=81000, so 3 tokens won't fire.
+			const { handler } = captureHandler({
+				compactAfterTokens: 81000,
+				compactAfterTokensMode: "ratio",
+				compactAfterTokensRatio: 0.5,
+			});
+			const ctx = fakeCtx([dueBranch], { model: undefined });
+
+			handler(agentEnd(), ctx);
+			await vi.runAllTimersAsync();
+
+			expect(ctx.compact).not.toHaveBeenCalled();
+		});
+
+		it("falls back to calibrated value when contextWindow is zero", async () => {
+			const { handler } = captureHandler({
+				compactAfterTokens: 81000,
+				compactAfterTokensMode: "ratio",
+				compactAfterTokensRatio: 0.5,
+			});
+			const ctx = fakeCtx([dueBranch], { model: { contextWindow: 0 } });
+
+			handler(agentEnd(), ctx);
+			await vi.runAllTimersAsync();
+
+			expect(ctx.compact).not.toHaveBeenCalled();
+		});
+
+		it("uses the same resolved threshold on deferred re-check", async () => {
+			// threshold = 0.5 * 4 = 2; first branch has 3 (fires, deferred), isIdle=false defers,
+			// second branch has 1 (< 2) -> skipped because another compaction reduced pressure.
+			const { handler, runtime } = captureHandler({
+				compactAfterTokens: 81000,
+				compactAfterTokensMode: "ratio",
+				compactAfterTokensRatio: 0.5,
+			});
+			const ctx = fakeCtx([dueBranch, belowBranch], {
+				model: { contextWindow: 4 },
+				isIdle: vi.fn(() => false),
+			});
+
+			handler(agentEnd(), ctx);
+			await vi.runAllTimersAsync();
+
+			expect(ctx.compact).not.toHaveBeenCalled();
+			expect(runtime.compactInFlight).toBe(false);
+		});
 	});
 });

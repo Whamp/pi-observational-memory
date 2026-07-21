@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { resolveEffectiveCompactionTrigger } from "../config.js";
+import { resolveCompactAfterTokens, resolveEffectiveCompactionTrigger } from "../config.js";
 import { rawTokensSinceLastCompaction, type Entry } from "../session-ledger/index.js";
 import type { Runtime } from "../runtime.js";
 
@@ -35,7 +35,12 @@ export function registerCompactionTrigger(pi: ExtensionAPI, runtime: Runtime): v
 
 		const entries = ctx.sessionManager.getBranch() as Entry[];
 		const tokens = rawTokensSinceLastCompaction(entries);
-		if (tokens < runtime.config.compactAfterTokens) return;
+		// Resolve the proactive-compaction threshold from the active model's context
+		// window when ratio mode is configured. ctx.model is the current session model
+		// (Model<any> | undefined per ExtensionContext).
+		const contextWindow = typeof ctx.model?.contextWindow === "number" ? ctx.model.contextWindow : undefined;
+		const threshold = resolveCompactAfterTokens(runtime.config, contextWindow);
+		if (tokens < threshold) return;
 
 		// Capture ctx properties synchronously — the setTimeout + async work below
 		// may outlive the extension ctx (stale after session replacement/reload).
@@ -60,7 +65,7 @@ export function registerCompactionTrigger(pi: ExtensionAPI, runtime: Runtime): v
 				}
 				const currentEntries = ctx.sessionManager.getBranch() as Entry[];
 				const currentTokens = rawTokensSinceLastCompaction(currentEntries);
-				if (currentTokens < runtime.config.compactAfterTokens) {
+				if (currentTokens < threshold) {
 					runtime.compactInFlight = false;
 					if (hasUI) ui?.notify(
 						"Observational memory: compaction skipped — another compaction already ran before deferred compaction",
