@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { streamSimple } from "@earendil-works/pi-ai/compat";
+import { describe, expect, it, vi } from "vitest";
 
 import {
 	maxDropCountForPool,
@@ -89,6 +90,14 @@ describe("V3 dropper agent", () => {
 		expect(systemPrompt).not.toContain("drop-resistance");
 		expect(systemPrompt).not.toContain("Pass strategy");
 		expect(systemPrompt).not.toContain("Urgency guidance");
+	});
+
+	it("passes Pi's standard stream function to the agent loop", async () => {
+		const loop = vi.fn(fakeAgentLoop(() => {}));
+
+		await runDropper({ ...baseArgs, agentLoop: loop });
+
+		expect(loop).toHaveBeenCalledWith(expect.any(Array), expect.any(Object), expect.any(Object), undefined, streamSimple);
 	});
 
 	it("passes target-return max drops as a hard upper bound", async () => {

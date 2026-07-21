@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { streamSimple } from "@earendil-works/pi-ai/compat";
+import { describe, expect, it, vi } from "vitest";
 
 import {
 	normalizeSupportingObservationIds,
@@ -89,6 +90,14 @@ describe("V3 reflector agent", () => {
 		expect(systemPrompt).not.toContain("legacy/no-provenance");
 		expect(systemPrompt).not.toContain("pruner");
 		expect(systemPrompt).not.toContain("Pass strategy");
+	});
+
+	it("passes Pi's standard stream function to the agent loop", async () => {
+		const loop = vi.fn(fakeAgentLoop(() => {}));
+
+		await runReflector({ ...baseArgs, agentLoop: loop });
+
+		expect(loop).toHaveBeenCalledWith(expect.any(Array), expect.any(Object), expect.any(Object), undefined, streamSimple);
 	});
 
 	it("renders coverage tiers in every active observation line for the reflector", async () => {

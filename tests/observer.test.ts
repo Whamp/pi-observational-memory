@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { streamSimple } from "@earendil-works/pi-ai/compat";
+import { describe, expect, it, vi } from "vitest";
 
 import { normalizeSourceEntryIds, OBSERVATION_TIMESTAMP_PATTERN, runObserver } from "../src/agents/observer/agent.js";
 import { estimateStringTokens } from "../src/tokens.js";
@@ -53,6 +54,14 @@ describe("runObserver", () => {
 		expect(systemPrompt).toContain("highest-resistance, load-bearing observations");
 		expect(systemPrompt).not.toContain("will NEVER be dropped");
 		expect(systemPrompt).not.toContain("pruner");
+	});
+
+	it("passes Pi's standard stream function to the agent loop", async () => {
+		const loop = vi.fn(fakeAgentLoop(() => {}));
+
+		await runObserver({ ...baseArgs, agentLoop: loop });
+
+		expect(loop).toHaveBeenCalledWith(expect.any(Array), expect.any(Object), expect.any(Object), undefined, streamSimple);
 	});
 
 	it("records V3 observations with source ids and code-computed tokenCount", async () => {
