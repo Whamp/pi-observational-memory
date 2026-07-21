@@ -5,6 +5,7 @@ import {
 	entryIndexById,
 	isSourceEntry,
 	latestCoverageIndex,
+	latestObservationCoverageIndex,
 	latestCoverageMarkerId,
 	rawTokensAfterIndex,
 	rawTokensSinceDropCoverage,
@@ -19,6 +20,7 @@ import {
 	branchSummary,
 	compactionEntry,
 	observation,
+	observerCompletedEntry,
 	observationsDroppedEntry,
 	observationsRecordedEntry,
 	oldV2ObservationEntry,
@@ -72,6 +74,22 @@ describe("session-ledger V3 progress helpers", () => {
 		expect(rawTokensSinceObservationCoverage(entries)).toBe(9); // raw-2 + raw-3 + raw-4
 		expect(rawTokensSinceReflectionCoverage(entries)).toBe(7); // raw-3 + raw-4
 		expect(rawTokensSinceDropCoverage(entries)).toBe(7); // covers ledger entry om-eeeeeeeeeeee, raw after it
+	});
+
+	it("uses the greatest Recorded or Empty boundary as Observation Coverage regardless of append order", () => {
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			textCustomMessage("raw-2", "bbbbbbbb"),
+			textCustomMessage("raw-3", "cccccccccccc"),
+			observerCompletedEntry("om-empty-latest", { outcome: "empty", coversUpToId: "raw-3" }),
+			observationsRecordedEntry("om-recorded-older", { observations: [observation("aaaaaaaaaaaa")], coversUpToId: "raw-2" }),
+			textCustomMessage("raw-4", "dddddddddddddddd"),
+		];
+
+		expect(latestObservationCoverageIndex(entries)).toBe(2);
+		expect(rawTokensSinceObservationCoverage(entries)).toBe(4);
+		expect(rawTokensSinceReflectionCoverage(entries)).toBe(10);
+		expect(rawTokensSinceDropCoverage(entries)).toBe(10);
 	});
 
 	it("lets coversUpToId point to a memory ledger entry", () => {
@@ -128,6 +146,24 @@ describe("session-ledger V3 progress helpers", () => {
 		expect(() => rawTokensSinceObservationCoverage(entries)).not.toThrow();
 		expect(rawTokensSinceObservationCoverage(entries)).toBe(3);
 		expect(latestCoverageIndex(entries, V3_REFLECTIONS_RECORDED)).toBe(-1);
+	});
+
+	it("ignores malformed and orphaned Empty markers without advancing Observation Coverage", () => {
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			observerCompletedEntry("om-empty-wrong-outcome", { outcome: "empty", coversUpToId: "raw-1" }, {
+				data: { outcome: "recorded", coversUpToId: "raw-1" },
+			}),
+			observerCompletedEntry("om-empty-no-boundary", { outcome: "empty", coversUpToId: "raw-1" }, {
+				data: { outcome: "empty", coversUpToId: "" },
+			}),
+			observerCompletedEntry("om-empty-orphan", { outcome: "empty", coversUpToId: "missing" }),
+			textCustomMessage("raw-2", "bbbbbbbb"),
+		];
+
+		expect(() => rawTokensSinceObservationCoverage(entries)).not.toThrow();
+		expect(latestObservationCoverageIndex(entries)).toBe(-1);
+		expect(rawTokensSinceObservationCoverage(entries)).toBe(3);
 	});
 
 	it("counts raw tokens since the latest Pi compaction without throwing on old memory details", () => {

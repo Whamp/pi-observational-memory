@@ -1,10 +1,12 @@
 import { estimateEntryTokens } from "../tokens.js";
 import {
+	OM_OBSERVER_COMPLETED,
 	OM_OBSERVATIONS_DROPPED,
 	OM_OBSERVATIONS_RECORDED,
 	OM_REFLECTIONS_RECORDED,
+	isObserverCompletedData,
+	type CoverageCustomType,
 	type Entry,
-	type V3MemoryCustomType,
 } from "./types.js";
 
 const SOURCE_ENTRY_TYPES = new Set(["message", "custom_message", "branch_summary"]);
@@ -33,16 +35,17 @@ function isNonEmptyArray(value: unknown): value is unknown[] {
 	return Array.isArray(value) && value.length > 0;
 }
 
-function isValidCoverageEntry(entry: Entry, customType: V3MemoryCustomType): entry is Entry & { data: { coversUpToId: string } } {
+function isValidCoverageEntry(entry: Entry, customType: CoverageCustomType): entry is Entry & { data: { coversUpToId: string } } {
 	if (entry.type !== "custom" || entry.customType !== customType) return false;
 	if (!isObject(entry.data) || typeof entry.data.coversUpToId !== "string") return false;
 
+	if (customType === OM_OBSERVER_COMPLETED) return isObserverCompletedData(entry.data);
 	if (customType === OM_OBSERVATIONS_RECORDED) return isNonEmptyArray(entry.data.observations);
 	if (customType === OM_REFLECTIONS_RECORDED) return isNonEmptyArray(entry.data.reflections);
 	return isNonEmptyArray(entry.data.observationIds);
 }
 
-export function latestCoverageIndex(entries: Entry[], customType: V3MemoryCustomType): number {
+export function latestCoverageIndex(entries: Entry[], customType: CoverageCustomType): number {
 	const idToIndex = entryIndexById(entries);
 	let latest = -1;
 
@@ -56,7 +59,7 @@ export function latestCoverageIndex(entries: Entry[], customType: V3MemoryCustom
 	return latest;
 }
 
-export function latestCoverageMarkerId(entries: Entry[], customType: V3MemoryCustomType): string | undefined {
+export function latestCoverageMarkerId(entries: Entry[], customType: CoverageCustomType): string | undefined {
 	const idToIndex = entryIndexById(entries);
 	let latestIndex = -1;
 	let latestMarkerId: string | undefined;
@@ -94,12 +97,20 @@ export function rawTokensAfterIndex(entries: Entry[], index: number): number {
 	return total;
 }
 
-export function rawTokensSinceCoverage(entries: Entry[], customType: V3MemoryCustomType): number {
+export function rawTokensSinceCoverage(entries: Entry[], customType: CoverageCustomType): number {
 	return rawTokensAfterIndex(entries, latestCoverageIndex(entries, customType));
 }
 
+/** Returns the greatest valid Recorded or Empty Observation Coverage index. */
+export function latestObservationCoverageIndex(entries: Entry[]): number {
+	return Math.max(
+		latestCoverageIndex(entries, OM_OBSERVATIONS_RECORDED),
+		latestCoverageIndex(entries, OM_OBSERVER_COMPLETED),
+	);
+}
+
 export function rawTokensSinceObservationCoverage(entries: Entry[]): number {
-	return rawTokensSinceCoverage(entries, OM_OBSERVATIONS_RECORDED);
+	return rawTokensAfterIndex(entries, latestObservationCoverageIndex(entries));
 }
 
 export function rawTokensSinceReflectionCoverage(entries: Entry[]): number {

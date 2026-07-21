@@ -74,6 +74,15 @@ describe("Runtime V3 behavior", () => {
 		expect(runtime.consolidationPhase).toBeUndefined();
 	});
 
+	it("keeps the last observer error until an observer outcome clears it", async () => {
+		const runtime = new Runtime();
+		runtime.lastObserverError = "observer reported no structured outcome";
+
+		await runtime.launchConsolidationTask({ hasUI: false }, async () => {});
+
+		expect(runtime.lastObserverError).toBe("observer reported no structured outcome");
+	});
+
 	it("records stage-specific consolidation errors", () => {
 		const runtime = new Runtime();
 		const notify = vi.fn();

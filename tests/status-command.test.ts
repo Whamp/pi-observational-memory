@@ -5,6 +5,7 @@ import {
 	compactionEntry,
 	memoryDetails,
 	observation,
+	observerCompletedEntry,
 	observationsDroppedEntry,
 	observationsRecordedEntry,
 	oldV2CompactionDetails,
@@ -121,6 +122,21 @@ describe("V3 /om:status", () => {
 		expect(output).not.toContain("Observation pool:");
 		expect(output).not.toContain("Full fold pool:");
 		expect(output).not.toContain("visible observation tokens");
+	});
+
+	it("derives Next observation from Empty coverage without increasing memory counts", async () => {
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			observerCompletedEntry("om-empty", { outcome: "empty", coversUpToId: "raw-1" }),
+			textCustomMessage("raw-2", "bbbbbbbb"),
+		];
+
+		const output = await setup({ entries }).run();
+
+		expect(output).toContain("Observations: 0 recorded / 0 dropped / 0 active / 0 visible");
+		expect(output).toContain("Reflections:  0 recorded / 0 visible");
+		expect(output).toContain("Next observation: ~2 / 10 tokens (20%)");
+		expect(output).toContain("Next reflection:  ~3 / 20 tokens (15%)");
 	});
 
 	it("shows over-target active observation pool in the Activity section", async () => {

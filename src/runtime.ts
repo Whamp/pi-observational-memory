@@ -65,7 +65,6 @@ export class Runtime {
 	launchConsolidationTask(ctx: LaunchCtx, work: () => Promise<void>): Promise<void> {
 		this.consolidationInFlight = true;
 		this.consolidationPhase = undefined;
-		this.lastObserverError = undefined;
 		this.lastReflectorError = undefined;
 		this.lastDropperError = undefined;
 		const promise = this.launchTrackedTask(ctx, "consolidation", work, () => {

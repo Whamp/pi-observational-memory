@@ -11,6 +11,7 @@ import {
 	compactionEntry,
 	memoryDetails,
 	observation,
+	observerCompletedEntry,
 	observationsDroppedEntry,
 	observationsRecordedEntry,
 	oldV2CompactionDetails,
@@ -35,6 +36,20 @@ describe("session-ledger V3 projections", () => {
 
 		expect(projection.observations.map((obs) => obs.id)).toEqual(["bbbbbbbbbbbb"]);
 		expect(projection.reflections.map((ref) => ref.id)).toEqual(["eeeeeeeeeeee"]);
+	});
+
+	it("keeps Empty completion metadata out of full and compaction projections", () => {
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			observerCompletedEntry("om-empty", { outcome: "empty", coversUpToId: "raw-1" }),
+		];
+
+		expect(fullProjection(entries)).toEqual({ observations: [], reflections: [] });
+		expect(buildCompactionProjection(entries, "raw-1", { observationsPoolMaxTokens: 100 })).toMatchObject({
+			observations: [],
+			reflections: [],
+			details: { observations: [], reflections: [] },
+		});
 	});
 
 	it("visible projection is empty when there is no V3 compaction", () => {

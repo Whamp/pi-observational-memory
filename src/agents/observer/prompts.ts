@@ -15,7 +15,8 @@ How you work:
 2. Read the conversation chunk and identify what new information it contains.
 3. Call record_observations with a batch covering part (or all) of the chunk.
 4. Read the progress receipt. If content remains uncovered, call again. You may call the tool many times.
-5. When the chunk is fully covered, STOP calling the tool and reply with a brief plain-text confirmation (one short sentence). That ends the run.
+5. If no observations are warranted, call record_observations once with an empty observations array. This explicit empty submission is required; plain-text confirmation alone is a failed outcome.
+6. When the chunk is fully covered, STOP calling the tool and reply with a brief plain-text confirmation (one short sentence). That ends the run.
 
 What to emit:
 - Produce NEW observations for the new chunk only. Do not restate facts already present in reflections or current observations unless something has materially changed.
@@ -24,7 +25,7 @@ What to emit:
 - Never invent source entry ids. Use only ids printed in the chunk. If an observation spans multiple turns or tool results, include every supporting source entry id.
 - Observations with missing, empty, or invalid sourceEntryIds will be rejected and not recorded, so do not call record_observations until you can cite valid source ids.
 - Group repeated similar tool calls into a single observation rather than one per call.
-- Skip routine, low-information events. It is fine to emit zero observations if the chunk carries no new information — in that case, simply do not call the tool and end with a plain-text confirmation.
+- Skip routine, low-information events. If the chunk carries no new information, explicitly call record_observations with { observations: [] }, then end with a plain-text confirmation.
 
 Observation content rules:
 

@@ -9,9 +9,11 @@ import { debugLog, withDebugLogContext } from "../debug-log.js";
 import { type Runtime } from "../runtime.js";
 import { serializeSourceAddressedBranchEntries } from "../serialize.js";
 import {
+	OM_OBSERVER_COMPLETED,
 	OM_OBSERVATIONS_DROPPED,
 	OM_OBSERVATIONS_RECORDED,
 	OM_REFLECTIONS_RECORDED,
+	buildObserverCompletedData,
 	buildObservationsDroppedData,
 	buildObservationsRecordedData,
 	buildReflectionsRecordedData,
@@ -19,8 +21,8 @@ import {
 	foldLedger,
 	fullProjection,
 	isSourceEntry,
-	latestCoverageIndex,
 	latestCoverageMarkerId,
+	latestObservationCoverageIndex,
 	observationToSummaryLine,
 	rawTokensSinceObservationCoverage,
 	rawTokensSinceReflectionCoverage,
@@ -226,7 +228,7 @@ async function runObserverStage(
 	const tokens = rawTokensSinceObservationCoverage(entries);
 	if (tokens < runtime.config.observeAfterTokens) return "continue";
 
-	const lastCoverageIdx = latestCoverageIndex(entries, OM_OBSERVATIONS_RECORDED);
+	const lastCoverageIdx = latestObservationCoverageIndex(entries);
 	const chunkEntries = sourceEntriesAfter(entries, lastCoverageIdx);
 	const coversUpToId = chunkEntries.at(-1)?.id;
 	if (!coversUpToId) return "continue";
@@ -254,7 +256,7 @@ async function runObserverStage(
 	const resolved = await resolveModel("observer");
 	if (!resolved) return "abort";
 
-	const observations = await runObserver({
+	const result = await runObserver({
 		model: resolved.model as any,
 		apiKey: resolved.apiKey,
 		headers: resolved.headers,
@@ -265,26 +267,44 @@ async function runObserverStage(
 		maxTurns: runtime.config.agentMaxTurns,
 		thinkingLevel: resolved.thinking,
 	});
-	if (!observations || observations.length === 0) {
-		debugLog("observer.empty", { coversUpToId });
-		if (ctx.hasUI) ctx.ui?.notify(
-			"Observational memory: observer returned no observations",
-			"warning",
+
+	if (result.outcome === "failed") {
+		if (result.reason === "rejected_proposals") {
+			debugLog("observer.failed.rejected_proposals", { coversUpToId, rejectedCount: result.rejectedCount });
+			const message = `observer rejected ${result.rejectedCount} proposal${result.rejectedCount === 1 ? "" : "s"}`;
+			runtime.recordConsolidationStageError(ctx, "observer", new Error(message));
+		} else {
+			debugLog("observer.failed.no_structured_outcome", { coversUpToId });
+			runtime.recordConsolidationStageError(ctx, "observer", new Error("observer reported no structured outcome"));
+		}
+		return "continue";
+	}
+
+	if (result.outcome === "empty") {
+		const data = buildObserverCompletedData(coversUpToId);
+		if (!data) return "continue";
+		appendEntry(pi, OM_OBSERVER_COMPLETED, data);
+		runtime.lastObserverError = undefined;
+		debugLog("observer.empty.appended", { coversUpToId });
+		if (shouldNotifyWorker(runtime, ctx)) ctx.ui?.notify(
+			"Observational memory: observer found no new observations",
+			"info",
 		);
 		return "continue";
 	}
 
-	const data = buildObservationsRecordedData(observations, coversUpToId);
+	const data = buildObservationsRecordedData(result.observations, coversUpToId);
 	if (!data) return "continue";
 	debugLog("observer.records", {
-		count: observations.length,
-		observationTokens: observations.reduce((sum, observation) => sum + observation.tokenCount, 0),
+		count: result.observations.length,
+		observationTokens: result.observations.reduce((sum, observation) => sum + observation.tokenCount, 0),
 		coversUpToId,
 	});
 	appendEntry(pi, OM_OBSERVATIONS_RECORDED, data);
-	debugLog("observer.appended", { count: observations.length, coversUpToId });
+	runtime.lastObserverError = undefined;
+	debugLog("observer.appended", { count: result.observations.length, coversUpToId });
 	if (shouldNotifyWorker(runtime, ctx)) ctx.ui?.notify(
-		`Observational memory: ${observations.length} observation${observations.length === 1 ? "" : "s"} recorded`,
+		`Observational memory: ${result.observations.length} observation${result.observations.length === 1 ? "" : "s"} recorded`,
 		"info",
 	);
 	return "continue";

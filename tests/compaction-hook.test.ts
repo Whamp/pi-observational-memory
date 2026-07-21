@@ -5,6 +5,7 @@ import {
 	compactionEntry,
 	memoryDetails,
 	observation,
+	observerCompletedEntry,
 	observationsDroppedEntry,
 	observationsRecordedEntry,
 	oldV2CompactionDetails,
@@ -75,6 +76,23 @@ describe("V3 compaction hook", () => {
 		expect(runtime.resolveModel).not.toHaveBeenCalled();
 		expect(pi.appendEntry).not.toHaveBeenCalled();
 		expect(runtime.compactHookInFlight).toBe(false);
+	});
+
+	it("keeps Empty completion metadata out of compaction details and summaries", async () => {
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			observerCompletedEntry("om-empty", { outcome: "empty", coversUpToId: "raw-1" }),
+		];
+		const { run } = setup({ entries });
+
+		const result = await run("raw-1");
+
+		expect(result).toMatchObject({
+			compaction: {
+				details: { observations: [], reflections: [] },
+				summary: "",
+			},
+		});
 	});
 
 	it("first normal compaction writes covered observations without orphan reflections", async () => {

@@ -29,6 +29,8 @@ export type TestReflection = {
 	tokenCount: number;
 };
 
+/** Custom type used by Empty observer completion fixtures. */
+export const V3_OBSERVER_COMPLETED = "om.observer.completed";
 export const V3_OBSERVATIONS_RECORDED = "om.observations.recorded";
 export const V3_REFLECTIONS_RECORDED = "om.reflections.recorded";
 export const V3_OBSERVATIONS_DROPPED = "om.observations.dropped";
@@ -149,6 +151,23 @@ export function reflection(
 		content: `Reflection ${id}`,
 		supportingObservationIds,
 		tokenCount: 5,
+		...overrides,
+	};
+}
+
+/** Builds an Empty observer completion entry for ledger tests. */
+export function observerCompletedEntry(
+	id: string,
+	args: { outcome: "empty"; coversUpToId: string },
+	overrides: Partial<TestEntry> = {},
+): TestEntry {
+	return {
+		type: "custom",
+		id,
+		parentId: null,
+		timestamp: DEFAULT_TIMESTAMP,
+		customType: V3_OBSERVER_COMPLETED,
+		data: args,
 		...overrides,
 	};
 }

@@ -33,6 +33,13 @@ const RelevanceSchema = Type.Union([
 
 export const OBSERVATION_TIMESTAMP_PATTERN = "^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}$";
 
+/** The structured result of a completed observer run. */
+export type ObserverOutcome =
+	| { outcome: "recorded"; observations: Observation[] }
+	| { outcome: "empty" }
+	| { outcome: "failed"; reason: "rejected_proposals"; rejectedCount: number }
+	| { outcome: "failed"; reason: "no_structured_outcome" };
+
 const RecordObservationsSchema = Type.Object({
 	observations: Type.Array(
 		Type.Object({
@@ -55,7 +62,7 @@ const RecordObservationsSchema = Type.Object({
 				},
 			),
 		}),
-		{ description: "Batch of new observations. May be empty only if the tool is not called at all." },
+		{ description: "Batch of new observations. Submit an empty batch explicitly when no observations are warranted." },
 	),
 });
 
@@ -82,12 +89,15 @@ export function normalizeSourceEntryIds(
 	return Array.from(seen).sort((a, b) => (allowedOrder.get(a) ?? 0) - (allowedOrder.get(b) ?? 0));
 }
 
-export async function runObserver(args: RunObserverArgs): Promise<Observation[] | undefined> {
+/** Runs the observer and classifies its structured protocol outcome. */
+export async function runObserver(args: RunObserverArgs): Promise<ObserverOutcome> {
 	const { model, apiKey, headers, priorReflections, priorObservations, chunk, allowedSourceEntryIds, signal } = args;
 	const conversation = chunk.trim();
-	if (!conversation) return undefined;
+	if (!conversation) return { outcome: "failed", reason: "no_structured_outcome" };
 
 	const accumulated = new Map<string, Observation>();
+	let rejectedCount = 0;
+	let explicitlyEmpty = false;
 
 	const recordObservations: AgentTool<typeof RecordObservationsSchema> = {
 		name: "record_observations",
@@ -101,6 +111,7 @@ export async function runObserver(args: RunObserverArgs): Promise<Observation[] 
 			let added = 0;
 			let duplicates = 0;
 			let rejected = 0;
+			if (params.observations.length === 0) explicitlyEmpty = true;
 			for (const obs of params.observations) {
 				const sourceEntryIds = normalizeSourceEntryIds(obs.sourceEntryIds, allowedSourceEntryIds);
 				if (!sourceEntryIds) {
@@ -123,6 +134,7 @@ export async function runObserver(args: RunObserverArgs): Promise<Observation[] 
 				});
 				added++;
 			}
+			rejectedCount += rejected;
 			const rejectedPart = rejected > 0
 				? ` ${rejected} observation${rejected === 1 ? "" : "s"} rejected for missing or invalid sourceEntryIds.`
 				: "";
@@ -145,7 +157,7 @@ ${joinOrEmpty(priorReflections)}
 CURRENT OBSERVATIONS:
 ${joinOrEmpty(priorObservations)}
 
-Compress the following new conversation chunk into observations by calling record_observations one or more times. Do not restate facts already present in current reflections or current observations. Prefer inline conversation timestamps when assigning times; fall back to the current local time above only if no message timestamp applies. Stop calling the tool and reply with a short plain-text confirmation once the chunk is fully covered.
+Compress the following new conversation chunk into observations by calling record_observations one or more times. Do not restate facts already present in current reflections or current observations. Prefer inline conversation timestamps when assigning times; fall back to the current local time above only if no message timestamp applies. If no observations are warranted, explicitly call record_observations with an empty observations array. Stop calling the tool and reply with a short plain-text confirmation once the chunk is fully covered.
 
 NEW CONVERSATION CHUNK:
 ${conversation}`;
@@ -193,6 +205,8 @@ ${conversation}`;
 	}
 	await stream.result();
 
-	if (accumulated.size === 0) return undefined;
-	return Array.from(accumulated.values());
+	if (accumulated.size > 0) return { outcome: "recorded", observations: Array.from(accumulated.values()) };
+	if (rejectedCount > 0) return { outcome: "failed", reason: "rejected_proposals", rejectedCount };
+	if (explicitlyEmpty) return { outcome: "empty" };
+	return { outcome: "failed", reason: "no_structured_outcome" };
 }

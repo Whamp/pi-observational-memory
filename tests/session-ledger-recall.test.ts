@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { recallMemorySources, type Entry, type Observation, type Reflection } from "../src/session-ledger/recall.js";
 import {
+	OM_OBSERVER_COMPLETED,
 	OM_OBSERVATIONS_DROPPED,
 	OM_OBSERVATIONS_RECORDED,
 	OM_REFLECTIONS_RECORDED,
@@ -225,6 +226,20 @@ describe("session-ledger recall", () => {
 		expect(recallMemorySources(entries, OBS_1).status).toBe("not_found");
 		expect(recallMemorySources(entries, OBS_2).status).toBe("not_found");
 		expect(recallMemorySources(entries, REF_1).status).toBe("not_found");
+	});
+
+	it("does not recall Empty completion entries as memory", () => {
+		const entries: Entry[] = [
+			sourceEntry("src-1"),
+			{
+				type: "custom",
+				id: OBS_1,
+				customType: OM_OBSERVER_COMPLETED,
+				data: { outcome: "empty", coversUpToId: "src-1" },
+			},
+		];
+
+		expect(recallMemorySources(entries, OBS_1).status).toBe("not_found");
 	});
 
 	it("reports collisions when an id matches multiple V3 records", () => {

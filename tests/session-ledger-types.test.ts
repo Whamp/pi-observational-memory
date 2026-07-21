@@ -2,13 +2,17 @@ import { describe, expect, it } from "vitest";
 
 import {
 	OM_FOLDED,
+	OM_OBSERVER_COMPLETED,
 	OM_OBSERVATIONS_DROPPED,
 	OM_OBSERVATIONS_RECORDED,
 	OM_REFLECTIONS_RECORDED,
+	buildObserverCompletedData,
 	buildObservationsDroppedData,
 	buildObservationsRecordedData,
 	buildReflectionsRecordedData,
 	isMemoryDetails,
+	isObserverCompletedData,
+	isObserverCompletedEntry,
 	isObservationsDroppedData,
 	isObservationsDroppedEntry,
 	isObservationsRecordedData,
@@ -21,6 +25,7 @@ import {
 import {
 	memoryDetails,
 	observation,
+	observerCompletedEntry,
 	observationsDroppedEntry,
 	observationsRecordedEntry,
 	oldV2CompactionDetails,
@@ -35,6 +40,18 @@ describe("session-ledger V3 type guards and builders", () => {
 		expect(OM_REFLECTIONS_RECORDED).toBe("om.reflections.recorded");
 		expect(OM_OBSERVATIONS_DROPPED).toBe("om.observations.dropped");
 		expect(OM_FOLDED).toBe("om.folded");
+	});
+
+	it("validates and builds explicit Empty observer completion entries", () => {
+		const data = { outcome: "empty", coversUpToId: "raw-1" };
+
+		expect(OM_OBSERVER_COMPLETED).toBe("om.observer.completed");
+		expect(isObserverCompletedData(data)).toBe(true);
+		expect(isObserverCompletedData({ ...data, outcome: "recorded" })).toBe(false);
+		expect(isObserverCompletedData({ ...data, coversUpToId: "" })).toBe(false);
+		expect(buildObserverCompletedData("raw-1")).toEqual(data);
+		expect(buildObserverCompletedData("")).toBeUndefined();
+		expect(isObserverCompletedEntry(observerCompletedEntry("om-empty-1", data))).toBe(true);
 	});
 
 	it("accepts valid V3 observation records and rejects observations without source ids", () => {

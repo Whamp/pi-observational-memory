@@ -2,7 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import { observationPoolMetrics } from "../src/agents/dropper/pool.js";
 import { foldLedger } from "../src/session-ledger/index.js";
-import { observation, observationsDroppedEntry, observationsRecordedEntry, textCustomMessage } from "./fixtures/session.js";
+import {
+	observation,
+	observerCompletedEntry,
+	observationsDroppedEntry,
+	observationsRecordedEntry,
+	textCustomMessage,
+} from "./fixtures/session.js";
 
 describe("V3 dropper active observation pool metrics", () => {
 	it("reports below-target pools as not ready", () => {
@@ -65,6 +71,20 @@ describe("V3 dropper active observation pool metrics", () => {
 		expect(metrics.tokensOverTarget).toBe(2);
 		expect(metrics.maxDropsAllowed).toBe(2);
 		expect(metrics.ready).toBe(true);
+	});
+
+	it("does not treat Empty completion metadata as an observation pool item", () => {
+		const entries = [
+			textCustomMessage("raw-1", "aaaaaaaa"),
+			observerCompletedEntry("om-empty", { outcome: "empty", coversUpToId: "raw-1" }),
+		];
+
+		const folded = foldLedger(entries);
+		const metrics = observationPoolMetrics(folded.activeObservations, 100);
+
+		expect(folded.activeObservations).toEqual([]);
+		expect(metrics.activeObservationCount).toBe(0);
+		expect(metrics.observationTokens).toBe(0);
 	});
 
 	it("uses folded active observations so tombstones reduce readiness", () => {

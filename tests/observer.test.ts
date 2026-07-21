@@ -39,8 +39,10 @@ describe("runObserver", () => {
 
 	it("keeps core observer prompt rules", async () => {
 		let systemPrompt = "";
-		const loop = fakeAgentLoop((_prompts, context) => {
+		let userPrompt = "";
+		const loop = fakeAgentLoop((prompts, context) => {
 			systemPrompt = context.systemPrompt;
+			userPrompt = prompts[0].content[0].text;
 		});
 
 		await runObserver({ ...baseArgs, agentLoop: loop });
@@ -49,11 +51,14 @@ describe("runObserver", () => {
 		expect(systemPrompt).toContain("Detail preservation");
 		expect(systemPrompt).toContain("Frame state changes as supersession");
 		expect(systemPrompt).toContain("sourceEntryIds");
-		expect(systemPrompt).toContain("zero observations");
+		expect(systemPrompt).toContain("empty observations array");
+		expect(systemPrompt).toContain("plain-text confirmation alone is a failed outcome");
+		expect(systemPrompt).not.toContain("simply do not call the tool");
 		expect(systemPrompt).toContain("The dropper will drop these first");
 		expect(systemPrompt).toContain("highest-resistance, load-bearing observations");
 		expect(systemPrompt).not.toContain("will NEVER be dropped");
 		expect(systemPrompt).not.toContain("pruner");
+		expect(userPrompt).toContain("explicitly call record_observations with an empty observations array");
 	});
 
 	it("passes Pi's standard stream function to the agent loop", async () => {
@@ -64,6 +69,16 @@ describe("runObserver", () => {
 		expect(loop).toHaveBeenCalledWith(expect.any(Array), expect.any(Object), expect.any(Object), undefined, streamSimple);
 	});
 
+	it("reports Empty only after an explicit empty observations submission", async () => {
+		const loop = fakeAgentLoop(async (_prompts, context) => {
+			await context.tools[0].execute("tool-1", { observations: [] });
+		});
+
+		await expect(runObserver({ ...baseArgs, agentLoop: loop })).resolves.toEqual({
+			outcome: "empty",
+		});
+	});
+
 	it("records V3 observations with source ids and code-computed tokenCount", async () => {
 		const content = "User asked for a memory update.";
 		const loop = fakeAgentLoop(async (_prompts, context) => {
@@ -72,27 +87,66 @@ describe("runObserver", () => {
 			});
 		});
 
-		const observations = await runObserver({ ...baseArgs, agentLoop: loop });
+		const result = await runObserver({ ...baseArgs, agentLoop: loop });
 
-		expect(observations).toHaveLength(1);
-		expect(observations?.[0]).toMatchObject({
+		expect(result.outcome).toBe("recorded");
+		if (result.outcome !== "recorded") return;
+		expect(result.observations).toHaveLength(1);
+		expect(result.observations[0]).toMatchObject({
 			content,
 			timestamp: "2026-05-02 10:30",
 			relevance: "high",
 			sourceEntryIds: ["entry-a"],
 			tokenCount: estimateStringTokens(content),
 		});
-		expect(observations?.[0].id).toMatch(/^[a-f0-9]{12}$/);
+		expect(result.observations[0].id).toMatch(/^[a-f0-9]{12}$/);
 	});
 
-	it("rejects invented source ids and returns no observations", async () => {
+	it("reports Failed when every proposed observation is rejected", async () => {
 		const loop = fakeAgentLoop(async (_prompts, context) => {
 			await context.tools[0].execute("tool-1", {
 				observations: [{ timestamp: "2026-05-02 10:30", content: "Bad source", relevance: "medium", sourceEntryIds: ["missing"] }],
 			});
 		});
 
-		await expect(runObserver({ ...baseArgs, agentLoop: loop })).resolves.toBeUndefined();
+		await expect(runObserver({ ...baseArgs, agentLoop: loop })).resolves.toEqual({
+			outcome: "failed",
+			reason: "rejected_proposals",
+			rejectedCount: 1,
+		});
+	});
+
+	it("reports Recorded when empty, accepted, and rejected proposals occur in the same run", async () => {
+		const loop = fakeAgentLoop(async (_prompts, context) => {
+			await context.tools[0].execute("tool-empty", { observations: [] });
+			await context.tools[0].execute("tool-1", {
+				observations: [
+					{ timestamp: "2026-05-02 10:30", content: "Accepted", relevance: "high", sourceEntryIds: ["entry-a"] },
+					{ timestamp: "2026-05-02 10:31", content: "Rejected", relevance: "medium", sourceEntryIds: ["missing"] },
+				],
+			});
+		});
+
+		const result = await runObserver({ ...baseArgs, agentLoop: loop });
+
+		expect(result.outcome).toBe("recorded");
+		if (result.outcome !== "recorded") return;
+		expect(result.observations.map((item) => item.content)).toEqual(["Accepted"]);
+	});
+
+	it("reports Failed when an explicit empty submission is followed by a rejection", async () => {
+		const loop = fakeAgentLoop(async (_prompts, context) => {
+			await context.tools[0].execute("tool-1", { observations: [] });
+			await context.tools[0].execute("tool-2", {
+				observations: [{ timestamp: "2026-05-02 10:30", content: "Rejected", relevance: "medium", sourceEntryIds: ["missing"] }],
+			});
+		});
+
+		await expect(runObserver({ ...baseArgs, agentLoop: loop })).resolves.toEqual({
+			outcome: "failed",
+			reason: "rejected_proposals",
+			rejectedCount: 1,
+		});
 	});
 
 	it("dedupes deterministic ids", async () => {
@@ -105,15 +159,20 @@ describe("runObserver", () => {
 			});
 		});
 
-		const observations = await runObserver({ ...baseArgs, agentLoop: loop });
+		const result = await runObserver({ ...baseArgs, agentLoop: loop });
 
-		expect(observations).toHaveLength(1);
-		expect(observations?.[0].content).toBe("Same content");
+		expect(result.outcome).toBe("recorded");
+		if (result.outcome !== "recorded") return;
+		expect(result.observations).toHaveLength(1);
+		expect(result.observations[0].content).toBe("Same content");
 	});
 
-	it("returns undefined when no tool call records observations", async () => {
+	it("reports Failed when no structured outcome is submitted", async () => {
 		const loop = fakeAgentLoop(() => {});
-		await expect(runObserver({ ...baseArgs, agentLoop: loop })).resolves.toBeUndefined();
+		await expect(runObserver({ ...baseArgs, agentLoop: loop })).resolves.toEqual({
+			outcome: "failed",
+			reason: "no_structured_outcome",
+		});
 	});
 
 	it("uses maxTurns as an observer turn cap", async () => {
