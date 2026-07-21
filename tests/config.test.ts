@@ -46,6 +46,7 @@ describe("V3 config", () => {
 			observationsPoolTargetTokens: 10000,
 			agentMaxTurns: 16,
 			compactionTrigger: "auto",
+			showWorkerNotifications: true,
 			passive: false,
 			debugLog: false,
 		});
@@ -86,6 +87,16 @@ describe("V3 config", () => {
 			passive: true,
 			debugLog: true,
 		});
+	});
+
+	it("loads the worker notification preference", () => {
+		writeJson(join(cwd, ".pi", "settings.json"), {
+			"observational-memory": {
+				showWorkerNotifications: false,
+			},
+		});
+
+		expect(loadConfig(cwd, {})).toMatchObject({ showWorkerNotifications: false });
 	});
 
 	it("ignores invalid V3 values", () => {

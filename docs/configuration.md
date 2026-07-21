@@ -41,6 +41,7 @@ The extension loads config once for its runtime. After changing settings, restar
       "id": "google/gemma-4-31b-it",
       "thinking": "low"
     },
+    "showWorkerNotifications": true,
     "passive": false,
     "debugLog": false
   }
@@ -67,6 +68,7 @@ You can omit everything. Defaults work for ordinary sessions, and if `model` is 
 | `observer` | object | unset | Optional per-stage override; see [stage overrides](#stage-specific-model-and-thinking-overrides). |
 | `reflector` | object | unset | Optional per-stage override; the dropper inherits this by default. |
 | `dropper` | object | unset | Optional per-stage override; inherits the reflector when unset. |
+| `showWorkerNotifications` | boolean | `true` | Shows routine observer, reflector, and dropper progress notifications. |
 | `passive` | boolean | `false` | Disables proactive background memory and auto-compaction triggers. |
 | `debugLog` | boolean | `false` | Writes best-effort per-session extension debug events to Pi's agent directory. |
 
@@ -232,6 +234,12 @@ If you set none of `observer`, `reflector`, or `dropper`, every stage resolves t
 ### Choosing stage models
 
 Do not hardcode specific model ids in shared defaults; treat these as benchmark-driven choices. The observer tends to work best with cheap, literal, low/off thinking capture, while the reflector and dropper may benefit from more judgment. Configure per stage based on your own evaluation, and prefer measuring solve rate with your own tasks before committing to a split.
+
+## `showWorkerNotifications`
+
+Default: `true`.
+
+When `false`, the extension hides routine observer, reflector, and dropper start/completion notifications. Model resolution warnings, no-output warnings, worker failures, compaction notifications, and explicit `/om:*` command output remain visible.
 
 ## `passive`
 

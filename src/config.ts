@@ -49,6 +49,7 @@ export interface Config {
 	observationsPoolTargetTokens: number;
 	agentMaxTurns: number;
 	compactionTrigger: CompactionTrigger;
+	showWorkerNotifications: boolean;
 	model?: ConfiguredModel;
 	observer?: StageModelConfig;
 	reflector?: StageModelConfig;
@@ -67,6 +68,7 @@ export const DEFAULTS: Config = {
 	observationsPoolTargetTokens: 10_000,
 	agentMaxTurns: 16,
 	compactionTrigger: "auto",
+	showWorkerNotifications: true,
 	passive: false,
 	debugLog: false,
 };
@@ -176,6 +178,9 @@ function normalizeSettingsConfig(value: Record<string, unknown>): Partial<Config
 	}
 	const ratio = validRatioOrUndefined(value.compactAfterTokensRatio);
 	if (ratio !== undefined) normalized.compactAfterTokensRatio = ratio;
+	if (typeof value.showWorkerNotifications === "boolean") {
+		normalized.showWorkerNotifications = value.showWorkerNotifications;
+	}
 	if (typeof value.passive === "boolean") normalized.passive = value.passive;
 	if (typeof value.debugLog === "boolean") normalized.debugLog = value.debugLog;
 	if (isCompactionTrigger(value.compactionTrigger)) normalized.compactionTrigger = value.compactionTrigger;

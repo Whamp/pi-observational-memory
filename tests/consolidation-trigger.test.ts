@@ -42,6 +42,7 @@ function setup(args: {
 	reflectAfterTokens?: number;
 	observationsPoolMaxTokens?: number;
 	observationsPoolTargetTokens?: number;
+	showWorkerNotifications?: boolean;
 	passive?: boolean;
 	consolidationInFlight?: boolean;
 	appendEntryReturnsId?: boolean;
@@ -71,6 +72,7 @@ function setup(args: {
 			observationsPoolMaxTokens: args.observationsPoolMaxTokens ?? 100,
 			observationsPoolTargetTokens: args.observationsPoolTargetTokens ?? Math.floor((args.observationsPoolMaxTokens ?? 100) / 2),
 			agentMaxTurns: 9,
+			showWorkerNotifications: args.showWorkerNotifications ?? true,
 			model: { provider: "anthropic", id: "memory", thinking: "minimal" },
 			...(args.observer ? { observer: args.observer } : {}),
 			...(args.reflector ? { reflector: args.reflector } : {}),
@@ -334,6 +336,20 @@ describe("V3 consolidation trigger", () => {
 		expect(mockAgents.runDropper).not.toHaveBeenCalled();
 	});
 
+	it("keeps the observer no-output warning when routine notifications are hidden", async () => {
+		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
+		const { fire, runLaunchedWork, ctx } = setup({ entries, showWorkerNotifications: false });
+
+		fire();
+		await runLaunchedWork();
+
+		expect(ctx.ui.notify).toHaveBeenCalledTimes(1);
+		expect(ctx.ui.notify).toHaveBeenCalledWith(
+			"Observational memory: observer returned no observations",
+			"warning",
+		);
+	});
+
 	it("model resolution failure skips appending and notifies once", async () => {
 		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
 		const { fire, runLaunchedWork, pi, runtime, ctx } = setup({ entries });
@@ -465,6 +481,28 @@ describe("V3 consolidation trigger", () => {
 		expect(mockAgents.runDropper).toHaveBeenCalledWith(expect.objectContaining({ reflections: [newRef], observations: [obsA] }));
 		expect(pi.appendEntry.mock.calls[0]).toEqual([OM_REFLECTIONS_RECORDED, { reflections: [newRef], coversUpToId: "raw-1" }]);
 		expect(pi.appendEntry.mock.calls[1]).toEqual([OM_OBSERVATIONS_DROPPED, { observationIds: ["aaaaaaaaaaaa"], coversUpToId: "raw-1" }]);
+	});
+
+	it("hides routine notifications without disabling the worker pipeline", async () => {
+		const newRef = reflection("ffffffffffff", ["aaaaaaaaaaaa"]);
+		mockAgents.runObserver.mockResolvedValueOnce([obsA]);
+		mockAgents.runReflector.mockResolvedValueOnce([newRef]);
+		mockAgents.runDropper.mockResolvedValueOnce(["aaaaaaaaaaaa"]);
+		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
+		const { fire, runLaunchedWork, pi, ctx } = setup({
+			entries,
+			observationsPoolTargetTokens: 5,
+			showWorkerNotifications: false,
+		});
+
+		fire();
+		await runLaunchedWork();
+
+		expect(mockAgents.runObserver).toHaveBeenCalled();
+		expect(mockAgents.runReflector).toHaveBeenCalled();
+		expect(mockAgents.runDropper).toHaveBeenCalled();
+		expect(pi.appendEntry).toHaveBeenCalledTimes(3);
+		expect(ctx.ui.notify).not.toHaveBeenCalled();
 	});
 
 	it("does not launch dropper-only work when active pool is over target", () => {
