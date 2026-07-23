@@ -57,7 +57,7 @@ You can omit everything. Defaults work for ordinary sessions, and if `model` is 
 | `observeAfterTokens` | positive integer | `10000` | Raw/source token threshold for observer runs. |
 | `reflectAfterTokens` | positive integer | `20000` | Raw/source token threshold for reflector runs; successful reflection creates dropper maintenance opportunities. |
 | `compactAfterTokens` | positive integer | `81000` | Raw/source token threshold for proactive extension-triggered compaction when the effective `compactionTrigger` is `agentEnd`. |
-| `compactionTrigger` | `auto`, `native`, or `agentEnd` | `auto` | Whether the extension proactively calls `ctx.compact()` or only customizes Pi native compactions. |
+| `compactionTrigger` | `auto`, `native`, or `agentEnd` | `auto` | Whether the extension proactively calls `ctx.compact()`. Every mode still uses Compaction Authority. |
 | `observationsPoolMaxTokens` | positive integer | `20000` | Normal compaction-projection observation-token pressure that makes compaction do a full fold. |
 | `observationsPoolTargetTokens` | positive integer below max | half of `observationsPoolMaxTokens` | Folded active observation target used by post-reflection dropper maintenance. |
 | `agentMaxTurns` | positive integer | `16` | Shared nested-agent turn cap for observer, reflector, and dropper. |
@@ -80,9 +80,9 @@ Invalid values are ignored. Positive-integer settings must be finite integers gr
 
 Default: `10000`.
 
-The observer runs from Pi's `turn_end` hook. It counts raw/source tokens after the latest `om.observations.recorded.data.coversUpToId` marker. When the count reaches `observeAfterTokens`, the observer receives source entries after that marker and may append a non-empty `om.observations.recorded` ledger entry.
+The observer runs from Pi's `turn_end` hook. It counts raw/source tokens after the latest Observation Coverage boundary. Recorded outcomes write a non-empty `om.observations.recorded` entry. Explicit Empty outcomes write `om.observer.completed` without creating observations. Both advance coverage. Failed outcomes write no coverage marker and leave the range eligible for another observer run.
 
-Lower values create smaller chunks and more frequent model calls. Higher values reduce model-call frequency but let unobserved raw conversation accumulate longer. If the observer emits no observations, no ledger entry is written and the same range remains eligible for a later observer run.
+Lower values create smaller chunks and more frequent model calls. Higher values reduce model-call frequency but let unobserved raw conversation accumulate longer.
 
 ## `reflectAfterTokens`
 
@@ -100,7 +100,7 @@ Default: `81000`.
 
 `compactAfterTokens` applies only when the effective `compactionTrigger` is `agentEnd`. In that mode, the proactive extension trigger runs from Pi's `agent_end` hook. It counts raw/source tokens after the latest compaction boundary. If the count reaches `compactAfterTokens`, the extension defers with `setTimeout(0)`, checks that Pi is idle, re-checks the threshold, and calls `ctx.compact()`.
 
-This trigger does not wait for observer, reflector, or dropper work. Actual compaction summary creation happens later in `session_before_compact`, where V3 compaction is deterministic and model-free.
+This trigger does not wait for observer, reflector, or dropper work. Actual ownership is decided later in `session_before_compact`. Covered source uses V3's deterministic, model-free projection. Uncovered source delegates to Pi's compaction pipeline, which may call the configured native summarization model.
 
 When the effective trigger is `native`, `compactAfterTokens` is ignored and Pi's own top-level `compaction` settings control when compaction happens. Pi's manual compaction also still runs the V3 `session_before_compact` hook.
 
@@ -108,12 +108,12 @@ When the effective trigger is `native`, `compactAfterTokens` is ignored and Pi's
 
 Default: `auto`.
 
-`compactionTrigger` controls only whether this extension proactively calls `ctx.compact()`. It does not disable the V3 compaction hook. The hook still handles every `session_before_compact` event and returns the observational-memory ledger summary for Pi native, manual, and extension-triggered compactions.
+`compactionTrigger` controls only whether this extension proactively calls `ctx.compact()`. It does not disable the V3 compaction hook. Every `session_before_compact` event runs the same Compaction Authority check. The hook returns an observational-memory summary only when Observation Coverage reaches the Pruned Source Boundary; otherwise it returns no override and does not cancel.
 
 Modes:
 
 - `auto`: use Pi native compaction timing in `print` and `json` modes; use the legacy `agent_end` trigger in `tui`, `rpc`, and unknown interactive modes.
-- `native`: never call extension `ctx.compact()` proactively. Pi's native top-level compaction settings decide timing, and V3 only customizes `session_before_compact` summaries.
+- `native`: never call extension `ctx.compact()` proactively. Pi's native top-level compaction settings decide timing. V3 supplies covered summaries and delegates uncovered source.
 - `agentEnd`: preserve the previous proactive behavior exactly: after `agent_end`, if raw/source tokens since the last compaction reach `compactAfterTokens` and Pi is idle, call `ctx.compact()`.
 
 For eval harnesses and `pi -p`, prefer native timing so Pi can use its own auto-compaction-and-continue path:
@@ -245,7 +245,7 @@ When `false`, the extension hides routine observer, reflector, and dropper start
 
 Default: `false`.
 
-When `true`, the extension does not proactively run the observer, reflector/dropper lane, or auto-compaction trigger. Manual/Pi compaction hooks, `/om:status`, `/om:view`, and `recall` remain available.
+When `true`, the extension does not proactively run the observer, reflector/dropper lane, or auto-compaction trigger. Manual and Pi compactions still run the authority check. Covered source uses prepared OM memory; uncovered source delegates to Pi's native summarization path. `/om:status`, `/om:view`, `/om:view full`, and `recall` remain available.
 
 Environment override:
 
@@ -275,7 +275,7 @@ Contexts without a usable session id fall back to the legacy global file:
 observational-memory/debug.ndjson
 ```
 
-Each row includes event metadata such as `sessionId`, `sessionFile`, `runId`, `cwd`, and event-specific `data`. `runId` identifies one consolidation pipeline inside a session file, so you can filter a session log to a single observer/reflector/dropper pass.
+Each row includes event metadata such as `sessionId`, `sessionFile`, `runId`, `cwd`, and event-specific `data`. `runId` identifies one consolidation pipeline inside a session file, so you can filter a session log to a single observer/reflector/dropper pass. `compaction.authority` records the selected owner, reason, and valid coverage/prune boundary ids without source or memory content.
 
 Dropper diagnostics are especially useful when the active observation pool is over target but no drops are appended. For example:
 

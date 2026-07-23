@@ -95,6 +95,27 @@ describe("session-ledger recall", () => {
 		expect(result.partial).toBe(false);
 	});
 
+	it("recalls durable memory after a native compaction becomes the visible boundary", () => {
+		const entries: Entry[] = [
+			sourceEntry("src-1", "important source"),
+			observationsEntry("obs-entry-1", [observation({ id: OBS_1, sourceEntryIds: ["src-1"] })]),
+			sourceEntry("src-2", "kept source"),
+			{
+				type: "compaction",
+				id: "native-compaction",
+				summary: "Native summary",
+				firstKeptEntryId: "src-2",
+			},
+		];
+
+		const result = recallMemorySources(entries, OBS_1);
+
+		expect(result.status).toBe("found");
+		if (result.status !== "found") return;
+		expect(result.observations[0].observation.id).toBe(OBS_1);
+		expect(result.observations[0].sourceEntries.map((entry) => entry.id)).toEqual(["src-1"]);
+	});
+
 	it("recalls a dropped observation and preserves source evidence", () => {
 		const entries = [
 			sourceEntry("src-1"),

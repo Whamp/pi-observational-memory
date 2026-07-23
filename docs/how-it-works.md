@@ -2,7 +2,7 @@
 
 This is the V3 technical reference for `pi-observational-memory`.
 
-V3 is ledger-centered: memory state is reconstructed by folding V3 ledger entries on the current branch. Compaction is model-free and renders a projection of that ledger into the summary the agent sees.
+V3 is ledger-centered: memory state is reconstructed by folding V3 ledger entries on the current branch. Covered compaction is model-free and renders a projection of that ledger. When Observation Coverage does not reach the Pruned Source Boundary, the extension delegates so Pi can summarize uncovered source.
 
 ## Runtime entry points
 
@@ -13,7 +13,7 @@ V3 is ledger-centered: memory state is reconstructed by folding V3 ledger entrie
 | `turn_end` observer trigger | Maybe run the observer in the background. |
 | `turn_end` reflect/drop trigger | Maybe run the due reflector, then run dropper maintenance only after same-run successful reflection. |
 | `agent_end` compaction trigger | Maybe call `ctx.compact()` when effective `compactionTrigger` is `agentEnd`, Pi is idle, and raw/source tokens are over `compactAfterTokens`. |
-| `session_before_compact` hook | Build the V3 compaction payload deterministically for Pi native, manual, and extension-triggered compactions. |
+| `session_before_compact` hook | Decide Compaction Authority; render a deterministic V3 summary when covered or delegate when uncovered. |
 | `/om:status` | Show ledger counts, drift, progress clocks, and worker state. |
 | `/om:view` | Show visible or full memory content and attempt to copy the rendered memory text. |
 | `recall` tool | Recover source evidence for a memory id. |
@@ -26,8 +26,8 @@ flowchart TD
     AE[agent_end]
     SBC[session_before_compact]
 
-    ObsDue{raw tokens since observation coverage<br/>≥ observeAfterTokens?}
-    Observer[Observer model call<br/>append om.observations.recorded]
+    ObsDue{raw tokens since Observation Coverage<br/>≥ observeAfterTokens?}
+    Observer[Observer model call<br/>Recorded, Empty, or Failed]
 
     ReflectDropDue{observer not due<br/>and reflection/drop clock due?}
     BothDue{both due?}
@@ -40,9 +40,12 @@ flowchart TD
     CompactCall[ctx.compact]
     Native[Pi native/manual compaction]
 
+    Authority{Observation Coverage reaches<br/>Pruned Source Boundary?}
     Fold[fold/project V3 ledger]
     Render[render deterministic summary]
     Details[return om.folded details]
+    Delegate[return no override]
+    PiSummary[Pi or later handler summarizes]
 
     TE --> ObsDue
     ObsDue -- yes --> Observer
@@ -58,7 +61,9 @@ flowchart TD
     CompactDue -- yes --> CompactCall
     CompactCall --> SBC
     Native --> SBC
-    SBC --> Fold --> Render --> Details
+    SBC --> Authority
+    Authority -- yes --> Fold --> Render --> Details
+    Authority -- no --> Delegate --> PiSummary
 ```
 
 The observer has priority. Reflect/drop does not run on a turn where observer work is due.
@@ -77,7 +82,7 @@ Every V3 ledger entry has `data.coversUpToId`. That field is a progress and proj
 
 | Worker/trigger | Progress source |
 |---|---|
-| Observer | latest `om.observations.recorded.data.coversUpToId` |
+| Observer | greatest valid Recorded `om.observations.recorded` or Empty `om.observer.completed` source boundary |
 | Reflector | latest `om.reflections.recorded.data.coversUpToId` |
 | Dropper | latest `om.observations.dropped.data.coversUpToId` |
 | Auto-compaction | latest compaction boundary |
@@ -85,6 +90,18 @@ Every V3 ledger entry has `data.coversUpToId`. That field is a progress and proj
 The watermark is also used to decide whether a memory ledger entry belongs to a bounded projection. It is not provenance. Provenance lives in `sourceEntryIds` and `supportingObservationIds`.
 
 ## Ledger data shapes
+
+### Empty observer completion
+
+```ts
+customType: "om.observer.completed"
+data: {
+  outcome: "empty";
+  coversUpToId: string;
+}
+```
+
+This marker records a trustworthy Empty outcome. It advances Observation Coverage but creates no observations and does not advance reflection or drop coverage.
 
 ### Observations recorded
 
@@ -166,18 +183,17 @@ The observer trigger runs on `turn_end`.
 
 1. Load config if needed.
 2. Skip if `passive` is true.
-3. Skip if `observerInFlight` is true.
-4. Count raw/source tokens since latest observation coverage.
+3. Skip if observer work is already in flight.
+4. Count raw/source tokens since latest Observation Coverage.
 5. Skip if below `observeAfterTokens`.
-6. Select source entries after the latest observation coverage marker.
-7. Serialize those source entries for the observer prompt.
-8. Resolve the memory model.
-9. Run `runObserver()` in a background task.
-10. Validate source ids returned by the model.
-11. Compute deterministic 12-character ids and per-observation token counts in code.
-12. Append `om.observations.recorded` only if at least one observation was accepted.
+6. Select and serialize source entries after the latest coverage marker.
+7. Resolve the memory model and run `runObserver()` in a background task.
+8. Validate source ids, compute deterministic ids, and classify the result.
+9. If at least one observation is accepted, append `om.observations.recorded` and classify the run as Recorded.
+10. If the observer explicitly reports an empty list with no rejected proposals, append `om.observer.completed` and classify the run as Empty.
+11. If every proposal is rejected or no structured outcome is reported, append no coverage marker and classify the run as Failed.
 
-If no observations are generated, the worker writes no entry and does not advance coverage. A later eligible observer run will see a larger range.
+Recorded and Empty advance Observation Coverage. Failed records an operational error, warns the user, and leaves the source eligible for another observer run.
 
 ## Reflect/drop flow
 
@@ -219,7 +235,7 @@ When the effective trigger is `agentEnd`, it skips when:
 
 When all checks pass, it calls `ctx.compact()`.
 
-When the effective trigger is `native`, `compactAfterTokens` is ignored and Pi's own top-level compaction settings decide timing. The V3 `session_before_compact` hook still customizes the summary when Pi native or manual compaction happens.
+When the effective trigger is `native`, `compactAfterTokens` is ignored and Pi's own top-level compaction settings decide timing. Pi native and manual compactions still run the V3 authority check. The extension customizes covered compactions and delegates uncovered compactions.
 
 This trigger does not wait for observer, reflector, or dropper promises. That is intentional: background memory work should never make compaction feel stuck.
 
@@ -227,24 +243,17 @@ This trigger does not wait for observer, reflector, or dropper promises. That is
 
 The compaction hook runs on `session_before_compact` and is the critical V3 latency path.
 
-It does only deterministic work:
-
 1. Guard against duplicate concurrent compaction hooks.
 2. Load config if needed.
-3. Read `event.preparation.firstKeptEntryId` and `event.preparation.tokensBefore`.
-4. Build a compaction projection from branch entries and `firstKeptEntryId`.
-5. Render a summary from projected reflections and observations.
-6. Return `{ compaction: { summary, firstKeptEntryId, tokensBefore, details } }` where `details.type` is `om.folded`.
+3. Resolve the Pruned Source Boundary: the final source entry newly removed before `firstKeptEntryId`, after the previous compaction boundary.
+4. Resolve the greatest valid source-backed Observation Coverage from Recorded and explicit Empty outcomes.
+5. Record the content-free authority decision in debug logs when enabled.
+6. If coverage reaches the prune boundary, build and render the deterministic projection and return `om.folded` details.
+7. Otherwise return no override and no cancellation so Pi or a later handler can summarize the source.
 
-It does not:
+The hook never runs observer, reflector, or dropper work and never waits for worker promises. The covered OM path calls no model. The delegated path may cause Pi to call its native summarization model after the hook returns.
 
-- call a model;
-- run a sync observer;
-- run reflector/dropper;
-- wait for worker promises;
-- append ledger entries.
-
-If another compaction hook is already in flight, it returns `{ cancel: true }`.
+If another compaction hook is already in flight, the duplicate call returns `{ cancel: true }`.
 
 ## Projections
 
@@ -256,7 +265,7 @@ Full projection folds valid V3 observations, reflections, and drops from branch 
 
 ### Visible projection
 
-Visible projection without a boundary reads the latest V3 `om.folded` compaction details. This is what the agent currently sees.
+Visible projection without a boundary inspects the latest compaction entry. Valid V3 `om.folded` details become visible structured memory. If the latest compaction is native or has non-OM details, visible structured observational memory is empty; the projection never searches backward to an older OM compaction. Full ledger memory remains available.
 
 ### Compaction projection
 
@@ -308,7 +317,7 @@ Shows:
 
 ### `/om:view`
 
-Default mode shows visible memory and attempts to copy the rendered memory text to the clipboard. If no V3 compaction has happened yet, visible memory can be empty because nothing has been folded into `om.folded` details; use `/om:view full` to inspect recorded branch memory before the first compaction.
+Default mode shows visible structured memory and attempts to copy the rendered memory text to the clipboard. Visible memory is empty before the first V3 compaction and after a latest native compaction because no current `om.folded` details are in active context. Use `/om:view full` to inspect durable branch memory in either case.
 
 Clipboard copy uses platform clipboard commands (`pbcopy`, `clip`, `wl-copy`, `xclip`, `xsel`, or `termux-clipboard-set`). If copying succeeds, Pi shows `Copied /om:view output to clipboard.` If copying fails, the command still prints the memory view and shows a warning. The clipboard text is only the rendered memory content; it does not include the success/failure line.
 
@@ -335,7 +344,7 @@ Recall ignores old V2 memory by construction because it indexes only V3 ledger e
 
 - Worker in-flight flags prevent duplicate observer or reflect/drop runs.
 - Observer priority prevents reflect/drop from advancing while source text is due for observation.
-- No-output workers append no empty ledger entries.
+- Explicit Empty observer outcomes append coverage metadata but no observation records; Failed outcomes append no coverage marker.
 - Invalid source/support/drop ids are filtered or rejected by code.
 - Background worker errors are recorded on runtime state and surfaced in `/om:status`.
 - Compaction does not wait for background workers; it folds whatever ledger state is already present.
@@ -348,8 +357,8 @@ V3 does not use V2 state shapes. Old V2 custom memory entries, old V2 compaction
 ## Invariants
 
 - The branch-local V3 ledger is the memory source of truth.
-- Pi compaction summaries represent what the agent sees.
-- Compaction is deterministic and model-free.
+- The latest Pi compaction entry determines visible structured memory.
+- Covered OM compaction is deterministic and model-free; uncovered compaction delegates to the host pipeline.
 - Observer input is raw/source entries only.
 - `coversUpToId` is a progress/projection watermark, not provenance.
 - Kept observations and reflections are rendered without paraphrase.

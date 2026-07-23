@@ -19,3 +19,11 @@ _Avoid_: Empty result, covered span
 **Observation Coverage**:
 The durable branch boundary through which an observer produced a Recorded or Empty outcome. It means the source was trustworthily evaluated, not that every source event became an observation.
 _Avoid_: Observation attempt, raw source backlog
+
+**Pruned Source Boundary**:
+The final source entry that one prepared compaction will newly remove from active context. It is strictly before Pi's first kept entry and excludes source already represented by the previous compaction boundary.
+_Avoid_: First kept entry, compaction entry
+
+**Compaction Authority**:
+The decision about who may provide one prepared compaction summary. Observational memory has authority only when trustworthy source-backed Observation Coverage reaches the Pruned Source Boundary; otherwise the host compaction pipeline has authority.
+_Avoid_: Compaction trigger, passive-mode policy

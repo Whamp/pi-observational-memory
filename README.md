@@ -115,12 +115,12 @@ Traditional compaction asks a model to rewrite the past at the moment the contex
 
 `pi-observational-memory` does the important memory work earlier, while the session is still happening.
 
-As you work, the extension captures observations and distills reflections in the background. When Pi needs to compact, the memory is already prepared. Compaction becomes a fast rendering step instead of a slow summarization event.
+As you work, the extension captures observations and distills reflections in the background. When trustworthy Observation Coverage reaches the source Pi will prune, compaction is a fast rendering step instead of a new model call. If coverage is short, the extension steps aside so Pi can summarize the uncovered source rather than replace it with incomplete memory.
 
 That gives you two big benefits:
 
-1. **Less coherence loss** — important context is preserved as observations and reflections instead of repeatedly compressed through summary chains.
-2. **Faster compaction** — the expensive memory work happens before compaction, not while you are waiting.
+1. **Less coherence loss** — important context is preserved as observations and reflections, while uncovered source falls back to Pi's native summary.
+2. **Faster covered compaction** — the expensive memory work happens before compaction when coverage is ready.
 
 ---
 
@@ -245,7 +245,7 @@ For eval harnesses and `pi -p`, prefer Pi's native auto-compaction timing so Pi 
 }
 ```
 
-When the effective trigger is `native`, the extension does not use `compactAfterTokens`, `compactAfterTokensMode`, or `compactAfterTokensRatio` to initiate compaction.
+When the effective trigger is `native`, the extension does not use `compactAfterTokens`, `compactAfterTokensMode`, or `compactAfterTokensRatio` to initiate compaction. Trigger choice does not change Compaction Authority: covered source uses the prepared OM summary, while uncovered source delegates to Pi.
 
 ### Scaling extension-triggered compaction to the model's context window
 
@@ -294,7 +294,7 @@ the extension owns compaction timing.
 | `compactAfterTokens`        | `81000`       | Raw/source token threshold for extension-triggered compaction when effective trigger is `agentEnd`; used directly in `"calibrated"` mode and as the fallback in `"ratio"` mode. |
 | `compactAfterTokensMode`    | `"calibrated"`| `"calibrated"` uses `compactAfterTokens` directly. `"ratio"` scales the threshold by the active model's `contextWindow`. Ignored when the effective trigger is `native`. |
 | `compactAfterTokensRatio`   | `0.68`        | In `"ratio"` mode, the threshold is `floor(contextWindow * ratio)`. Must be in `(0, 1)`. |
-| `compactionTrigger`         | `auto`        | `auto`, `native`, or `agentEnd`; controls whether the extension proactively calls `ctx.compact()` or only customizes Pi native compactions. |
+| `compactionTrigger`         | `auto`        | `auto`, `native`, or `agentEnd`; controls whether the extension proactively calls `ctx.compact()`. Every mode still uses Compaction Authority. |
 | `observationsPoolMaxTokens` | `20000`       | Observation-token budget used for compaction full-fold pressure.                                  |
 | `observationsPoolTargetTokens` | half of max | Active observation target used by post-reflection dropper maintenance.                            |
 | `agentMaxTurns`             | `16`          | Shared turn cap for background memory-agent loops.                                                |
@@ -336,7 +336,7 @@ For details and tuning guidance, see [`docs/configuration.md`](docs/configuratio
 | `/om:view full`     | Shows the full current memory state for the branch and attempts to copy the rendered memory text to the clipboard.                             |
 | `recall` agent tool | Recovers source evidence for a 12-character observation/reflection id on the current branch. It is not semantic search or a transcript browser. |
 
-`/om:view` copies only the rendered memory content. The success/failure line shown in Pi is not included in the clipboard text. If clipboard support is unavailable, the command still prints the memory view and shows a warning. Before the first V3 compaction, visible memory can be empty because nothing has been folded into `om.folded` details; use `/om:view full` to inspect recorded branch memory.
+`/om:view` copies only the rendered memory content. The success/failure line shown in Pi is not included in the clipboard text. If clipboard support is unavailable, the command still prints the memory view and shows a warning. Visible structured memory is empty before the first V3 compaction and after a latest native compaction because no current `om.folded` details are in active context. `/om:view full` still shows durable branch memory.
 
 ---
 
@@ -351,12 +351,17 @@ flowchart TD
     Trigger[extension auto-compaction trigger]
     Native[Pi native/manual compaction]
     Compact[session_before_compact]
-    Summary[visible memory for Pi]
+    Authority{Coverage reaches prune boundary?}
+    Summary[render prepared OM memory]
+    Delegate[delegate to Pi compaction pipeline]
 
     Turn -->|observation due| Observe
     Turn -->|reflection due| Reflect
-    AgentEnd -->|compactAfterTokens and effective trigger agentEnd| Trigger --> Compact --> Summary
+    AgentEnd -->|compactAfterTokens and effective trigger agentEnd| Trigger --> Compact
     Native --> Compact
+    Compact --> Authority
+    Authority -->|yes| Summary
+    Authority -->|no| Delegate
 ```
 
 The high-level lifecycle:
@@ -364,10 +369,11 @@ The high-level lifecycle:
 1. Pi session continues normally.
 2. The extension captures observations from the session as work happens.
 3. Durable reflections are distilled in the background.
-4. When compaction time arrives, Pi receives prepared memory quickly. The extension can trigger compaction after `agent_end`, or it can stay in `native` mode and only customize Pi's own compactions.
-5. The agent continues with a compact but useful view of the work so far.
+4. When compaction time arrives, the extension checks whether Observation Coverage reaches the Pruned Source Boundary.
+5. Covered source uses the prepared OM summary. Uncovered source delegates to Pi's compaction pipeline.
+6. The agent continues with covered memory or a native summary plus the kept tail.
 
-The important part: compaction does not need to rethink the whole session from scratch.
+The important part: prepared memory stays fast without letting incomplete coverage suppress Pi's fallback.
 
 ---
 
@@ -377,10 +383,10 @@ Current behavior:
 
 * **Observation-centered memory.** The extension records useful session observations while you work.
 * **Durable reflections.** The extension distills stable facts that help the agent stay oriented over time.
-* **Fast compaction.** `session_before_compact` does not call a model or wait for background workers. It renders the current prepared memory state.
+* **Coverage-gated compaction.** `session_before_compact` never waits for background workers. Covered source renders prepared memory without a model call; uncovered source delegates to Pi's compaction pipeline.
 * **Background memory work.** Observation and reflection work run from `turn_end` when their token clocks are due; dropper work runs only after successful reflection and prunes the folded active observation ledger toward `observationsPoolTargetTokens`.
 * **Source-backed recall.** Observations and reflections can be traced back through the `recall` tool.
-* **Visible/full views.** `/om:view` shows visible memory and `/om:view full` shows the full current memory state. Use `/om:status` for visible-vs-full drift and for the separate visible observation pool vs active observation pool.
+* **Visible/full views.** `/om:view` shows structured memory from the latest OM compaction; it is empty after a latest native compaction. `/om:view full` still shows durable branch memory. Use `/om:status` for drift and the separate visible versus active observation pools.
 * **No V2 compatibility layer.** Old V2 settings and memory entries are ignored rather than migrated.
 
 ---

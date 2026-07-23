@@ -9,6 +9,8 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
 	getAgentDir: () => mock.agentDir,
 }));
 
+import { registerCompactionHook } from "../src/hooks/compaction-hook.js";
+import { Runtime } from "../src/runtime.js";
 import {
 	DEBUG_LOG_RELATIVE_PATH,
 	debugLog,
@@ -16,6 +18,10 @@ import {
 	safeDebugLogSessionId,
 	withDebugLogContext,
 } from "../src/debug-log.js";
+import { observerCompletedEntry, textCustomMessage } from "./fixtures/session.js";
+
+type HookApi = Parameters<typeof registerCompactionHook>[0];
+type HookHandler = Parameters<HookApi["on"]>[1];
 
 describe("debug logging", () => {
 	let root: string;
@@ -97,6 +103,53 @@ describe("debug logging", () => {
 		expect(safeDebugLogSessionId(" session/../id:value ")).toBe("session_.._id_value");
 		expect(debugLogRelativePath({ sessionId: " session/../id:value " })).toBe(join("observational-memory", "debug", "session_.._id_value.ndjson"));
 		expect(debugLogRelativePath({ sessionId: "---" })).toBe(DEBUG_LOG_RELATIVE_PATH);
+	});
+
+	it("records Compaction Authority decisions without source content", async () => {
+		let handler: HookHandler | undefined;
+		const pi: HookApi = {
+			on: (eventName, callback) => {
+				expect(eventName).toBe("session_before_compact");
+				handler = callback;
+			},
+		};
+		const runtime = new Runtime();
+		runtime.config = { ...runtime.config, debugLog: true };
+		runtime.configLoaded = true;
+		registerCompactionHook(pi, runtime);
+		if (!handler) throw new Error("compaction handler was not registered");
+		const registeredHandler = handler;
+		const entries = [
+			textCustomMessage("raw-secret", "SOURCE_CONTENT_MUST_NOT_BE_LOGGED"),
+			observerCompletedEntry("om-empty", { outcome: "empty", coversUpToId: "raw-secret" }),
+			textCustomMessage("raw-kept", "kept"),
+		];
+
+		await registeredHandler({
+			preparation: { firstKeptEntryId: "raw-kept", tokensBefore: 123 },
+			branchEntries: entries,
+		}, {
+			cwd: "/tmp/project",
+			hasUI: false,
+			ui: { notify: vi.fn() },
+			sessionManager: {
+				getSessionId: () => "authority-session",
+				getSessionFile: () => "/tmp/session.jsonl",
+			},
+		});
+
+		const logPath = join(agentDir, "observational-memory", "debug", "authority-session.ndjson");
+		const rows = readJsonLines(logPath);
+		expect(rows).toMatchObject([{
+			event: "compaction.authority",
+			data: {
+				owner: "observational-memory",
+				reason: "covered",
+				coverageBoundaryId: "raw-secret",
+				pruneBoundaryId: "raw-secret",
+			},
+		}]);
+		expect(JSON.stringify(rows)).not.toContain("SOURCE_CONTENT_MUST_NOT_BE_LOGGED");
 	});
 
 	it("does not write logs when disabled", () => {

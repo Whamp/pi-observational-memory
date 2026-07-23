@@ -97,6 +97,31 @@ describe("V3 /om:view", () => {
 		expectNoDiagnostics(output);
 	});
 
+	it("hides structured memory after native compaction while full view retains durable memory", async () => {
+		const obs = observation("aaaaaaaaaaaa", { content: "Durable observation" });
+		const ref = reflection("eeeeeeeeeeee", ["aaaaaaaaaaaa"], { content: "Durable reflection" });
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			observationsRecordedEntry("om-observation", { observations: [obs], coversUpToId: "raw-1" }),
+			reflectionsRecordedEntry("om-reflection", { reflections: [ref], coversUpToId: "raw-1" }),
+			compactionEntry("cmp-om", {
+				firstKeptEntryId: "raw-1",
+				details: memoryDetails({ observations: [obs], reflections: [ref] }),
+			}),
+			textCustomMessage("raw-2", "bbbb"),
+			compactionEntry("cmp-native", { firstKeptEntryId: "raw-2" }),
+		];
+
+		const visible = await setup(entries).run();
+		const full = await setup(entries).run(["full"]);
+
+		expect(visible.clipboardText).toContain("No visible reflections.");
+		expect(visible.clipboardText).toContain("No visible observations.");
+		expect(visible.clipboardText).not.toContain("Durable observation");
+		expect(full.clipboardText).toContain("Durable reflection");
+		expect(full.clipboardText).toContain("Durable observation");
+	});
+
 	it("full view folds recorded V3 memory, excludes dropped observations, and copies clean output", async () => {
 		const obsA = observation("aaaaaaaaaaaa", { content: "Dropped observation content" });
 		const obsB = observation("bbbbbbbbbbbb", { content: "Kept observation content" });

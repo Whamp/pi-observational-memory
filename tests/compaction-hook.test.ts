@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { registerCompactionHook } from "../src/hooks/compaction-hook.js";
+import { Runtime } from "../src/runtime.js";
 import {
 	compactionEntry,
 	memoryDetails,
@@ -16,82 +17,143 @@ import {
 	type TestEntry,
 } from "./fixtures/session.js";
 
+type HookApi = Parameters<typeof registerCompactionHook>[0];
+type HookHandler = Parameters<HookApi["on"]>[1];
+type HookContext = Parameters<HookHandler>[1];
+type HookResult = Awaited<ReturnType<HookHandler>>;
+
+function requireCompaction(result: HookResult) {
+	if (!result.compaction) {
+		throw new Error("expected observational-memory compaction");
+	}
+	return result.compaction;
+}
+
 function setup(args: { entries: TestEntry[]; observationsPoolMaxTokens?: number; compactHookInFlight?: boolean }) {
-	let handler: ((event: unknown, ctx: unknown) => Promise<unknown>) | undefined;
-	const pi = {
-		on: vi.fn((eventName: string, cb: typeof handler) => {
+	let handler: HookHandler | undefined;
+	const pi: HookApi = {
+		on: vi.fn((eventName, callback) => {
 			expect(eventName).toBe("session_before_compact");
-			handler = cb;
+			handler = callback;
 		}),
-		appendEntry: vi.fn(),
 	};
-	const runtime = {
-		config: {
-			observationsPoolMaxTokens: args.observationsPoolMaxTokens ?? 20_000,
-		},
-		compactHookInFlight: args.compactHookInFlight ?? false,
-		observerPromise: new Promise(() => {}),
-		resolveModel: vi.fn(() => {
-			throw new Error("resolveModel must not be called");
-		}),
-		ensureConfig: vi.fn(),
+	const runtime = new Runtime();
+	runtime.config = {
+		...runtime.config,
+		observationsPoolMaxTokens: args.observationsPoolMaxTokens ?? 20_000,
 	};
-	registerCompactionHook(pi as any, runtime as any);
+	runtime.configLoaded = true;
+	runtime.compactHookInFlight = args.compactHookInFlight ?? false;
+	vi.spyOn(runtime, "resolveModel");
+	registerCompactionHook(pi, runtime);
 	if (!handler) throw new Error("compaction handler was not registered");
-	const ctx = {
+	const registeredHandler = handler;
+	const ctx: HookContext = {
 		cwd: "/tmp/project",
 		hasUI: true,
 		ui: { notify: vi.fn() },
-		sessionManager: { getBranch: vi.fn(() => args.entries) },
+		sessionManager: {
+			getSessionId: () => "test-session",
+			getSessionFile: () => "/tmp/test-session.jsonl",
+		},
 	};
-	const run = (firstKeptEntryId = args.entries.at(-1)?.id ?? "missing") => handler!({
+	const run = (firstKeptEntryId = args.entries.at(-1)?.id ?? "missing") => registeredHandler({
 		preparation: { firstKeptEntryId, tokensBefore: 123 },
 		branchEntries: args.entries,
-		signal: undefined,
 	}, ctx);
-	return { pi, runtime, ctx, run };
+	return { runtime, ctx, run };
 }
 
 describe("V3 compaction hook", () => {
-	it("returns valid empty om.folded details when there is no V3 memory", async () => {
-		const entries = [textCustomMessage("raw-1", "aaaa")];
-		const { run, runtime, pi } = setup({ entries });
+	it("relinquishes authority when fresh source is uncovered", async () => {
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			textCustomMessage("raw-2", "bbbb"),
+		];
+		const { run, runtime } = setup({ entries });
 
-		const result = await run("raw-1");
+		const result = await run("raw-2");
 
-		expect(result).toMatchObject({
-			compaction: {
-				firstKeptEntryId: "raw-1",
-				tokensBefore: 123,
-				summary: "",
-				details: {
-					type: "om.folded",
-					version: 1,
-					fullFold: false,
-					observations: [],
-					reflections: [],
-				},
-			},
-		});
+		expect(result).toEqual({});
 		expect(runtime.resolveModel).not.toHaveBeenCalled();
-		expect(pi.appendEntry).not.toHaveBeenCalled();
 		expect(runtime.compactHookInFlight).toBe(false);
+	});
+
+	it.each([
+		{
+			name: "partial coverage",
+			entries: [
+				textCustomMessage("raw-1", "aaaa"),
+				textCustomMessage("raw-2", "bbbb"),
+				textCustomMessage("raw-3", "cccc"),
+				observationsRecordedEntry("om-partial", {
+					observations: [observation("aaaaaaaaaaaa", { sourceEntryIds: ["raw-1"] })],
+					coversUpToId: "raw-1",
+				}),
+			],
+			firstKeptEntryId: "raw-3",
+		},
+		{
+			name: "Failed or absent coverage",
+			entries: [textCustomMessage("raw-1", "aaaa"), textCustomMessage("raw-2", "bbbb")],
+			firstKeptEntryId: "raw-2",
+		},
+		{
+			name: "malformed Empty coverage",
+			entries: [
+				textCustomMessage("raw-1", "aaaa"),
+				observerCompletedEntry("om-malformed", { outcome: "empty", coversUpToId: "raw-1" }, {
+					data: { outcome: "recorded", coversUpToId: "raw-1" },
+				}),
+				textCustomMessage("raw-2", "bbbb"),
+			],
+			firstKeptEntryId: "raw-2",
+		},
+		{
+			name: "orphaned coverage",
+			entries: [
+				textCustomMessage("raw-1", "aaaa"),
+				observerCompletedEntry("om-orphan", { outcome: "empty", coversUpToId: "missing" }),
+				textCustomMessage("raw-2", "bbbb"),
+			],
+			firstKeptEntryId: "raw-2",
+		},
+		{
+			name: "non-source coverage",
+			entries: [
+				textCustomMessage("raw-1", "aaaa"),
+				oldV2ObservationEntry("metadata-boundary"),
+				observerCompletedEntry("om-non-source", { outcome: "empty", coversUpToId: "metadata-boundary" }),
+				textCustomMessage("raw-2", "bbbb"),
+			],
+			firstKeptEntryId: "raw-2",
+		},
+		{
+			name: "unresolved first-kept boundary",
+			entries: [textCustomMessage("raw-1", "aaaa")],
+			firstKeptEntryId: "missing",
+		},
+	])("relinquishes authority for $name", async ({ entries, firstKeptEntryId }) => {
+		const { run, runtime, ctx } = setup({ entries });
+
+		await expect(run(firstKeptEntryId)).resolves.toEqual({});
+		expect(runtime.compactHookInFlight).toBe(false);
+		expect(ctx.ui.notify).not.toHaveBeenCalled();
 	});
 
 	it("keeps Empty completion metadata out of compaction details and summaries", async () => {
 		const entries = [
 			textCustomMessage("raw-1", "aaaa"),
 			observerCompletedEntry("om-empty", { outcome: "empty", coversUpToId: "raw-1" }),
+			textCustomMessage("raw-2", "bbbb"),
 		];
 		const { run } = setup({ entries });
 
-		const result = await run("raw-1");
+		const compaction = requireCompaction(await run("raw-2"));
 
-		expect(result).toMatchObject({
-			compaction: {
-				details: { observations: [], reflections: [] },
-				summary: "",
-			},
+		expect(compaction).toMatchObject({
+			details: { observations: [], reflections: [] },
+			summary: "",
 		});
 	});
 
@@ -102,16 +164,17 @@ describe("V3 compaction hook", () => {
 			textCustomMessage("raw-1", "aaaa"),
 			observationsRecordedEntry("om-aaaaaaaaaaaa", { observations: [obs1], coversUpToId: "raw-1" }),
 			reflectionsRecordedEntry("om-eeeeeeeeeeee", { reflections: [ref1], coversUpToId: "raw-1" }),
+			textCustomMessage("raw-2", "bbbb"),
 		];
 		const { run } = setup({ entries, observationsPoolMaxTokens: 100 });
 
-		const result = await run("raw-1") as any;
+		const compaction = requireCompaction(await run("raw-2"));
 
-		expect(result.compaction.details.fullFold).toBe(false);
-		expect(result.compaction.details.observations.map((obs: any) => obs.id)).toEqual(["aaaaaaaaaaaa"]);
-		expect(result.compaction.details.reflections).toEqual([]);
-		expect(result.compaction.summary).toContain("## Observations");
-		expect(result.compaction.summary).not.toContain("## Reflections");
+		expect(compaction.details.fullFold).toBe(false);
+		expect(compaction.details.observations.map((obs) => obs.id)).toEqual(["aaaaaaaaaaaa"]);
+		expect(compaction.details.reflections).toEqual([]);
+		expect(compaction.summary).toContain("## Observations");
+		expect(compaction.summary).not.toContain("## Reflections");
 	});
 
 	it("writes a normal V3 projection without applying new reflections or drops", async () => {
@@ -131,13 +194,13 @@ describe("V3 compaction hook", () => {
 		];
 		const { run } = setup({ entries, observationsPoolMaxTokens: 100 });
 
-		const result = await run("raw-2") as any;
+		const compaction = requireCompaction(await run("raw-2"));
 
-		expect(result.compaction.details).toMatchObject({ type: "om.folded", version: 1, fullFold: false });
-		expect(result.compaction.details.observations.map((obs: any) => obs.id)).toEqual(["aaaaaaaaaaaa", "bbbbbbbbbbbb"]);
-		expect(result.compaction.details.reflections.map((ref: any) => ref.id)).toEqual(["eeeeeeeeeeee"]);
-		expect(result.compaction.summary).toContain("## Reflections\n[eeeeeeeeeeee]");
-		expect(result.compaction.summary).toContain("## Observations");
+		expect(compaction.details).toMatchObject({ type: "om.folded", version: 1, fullFold: false });
+		expect(compaction.details.observations.map((obs) => obs.id)).toEqual(["aaaaaaaaaaaa", "bbbbbbbbbbbb"]);
+		expect(compaction.details.reflections.map((ref) => ref.id)).toEqual(["eeeeeeeeeeee"]);
+		expect(compaction.summary).toContain("## Reflections\n[eeeeeeeeeeee]");
+		expect(compaction.summary).toContain("## Observations");
 	});
 
 	it("writes a full V3 projection when observation pool pressure reaches the threshold", async () => {
@@ -157,11 +220,11 @@ describe("V3 compaction hook", () => {
 		];
 		const { run } = setup({ entries, observationsPoolMaxTokens: 100 });
 
-		const result = await run("raw-2") as any;
+		const compaction = requireCompaction(await run("raw-2"));
 
-		expect(result.compaction.details.fullFold).toBe(true);
-		expect(result.compaction.details.observations.map((obs: any) => obs.id)).toEqual(["bbbbbbbbbbbb"]);
-		expect(result.compaction.details.reflections.map((ref: any) => ref.id)).toEqual(["eeeeeeeeeeee", "ffffffffffff"]);
+		expect(compaction.details.fullFold).toBe(true);
+		expect(compaction.details.observations.map((obs) => obs.id)).toEqual(["bbbbbbbbbbbb"]);
+		expect(compaction.details.reflections.map((ref) => ref.id)).toEqual(["eeeeeeeeeeee", "ffffffffffff"]);
 	});
 
 	it("ignores old V2 memory entries and details", async () => {
@@ -169,12 +232,14 @@ describe("V3 compaction hook", () => {
 			textCustomMessage("raw-1", "aaaa"),
 			oldV2ObservationEntry("v2-obs"),
 			compactionEntry("cmp-v2", { firstKeptEntryId: "raw-1", details: oldV2CompactionDetails() }),
+			observerCompletedEntry("om-empty", { outcome: "empty", coversUpToId: "raw-1" }),
+			textCustomMessage("raw-2", "bbbb"),
 		];
 		const { run } = setup({ entries });
 
-		const result = await run("cmp-v2") as any;
+		const compaction = requireCompaction(await run("raw-2"));
 
-		expect(result.compaction.details).toMatchObject({
+		expect(compaction.details).toMatchObject({
 			type: "om.folded",
 			observations: [],
 			reflections: [],
@@ -182,11 +247,15 @@ describe("V3 compaction hook", () => {
 	});
 
 	it("does not wait for worker promises or call model resolution", async () => {
-		const entries = [textCustomMessage("raw-1", "aaaa")];
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			observerCompletedEntry("om-empty", { outcome: "empty", coversUpToId: "raw-1" }),
+			textCustomMessage("raw-2", "bbbb"),
+		];
 		const { run, runtime } = setup({ entries });
 
 		const result = await Promise.race([
-			run("raw-1"),
+			run("raw-2"),
 			new Promise((_, reject) => setTimeout(() => reject(new Error("timed out")), 50)),
 		]);
 

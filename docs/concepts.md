@@ -72,7 +72,7 @@ Dropping does not delete history. Dropped observations remain recallable from le
 
 The observer runs asynchronously from `turn_end` when raw/source tokens after the latest observation coverage marker reach `observeAfterTokens`.
 
-It receives raw/source entries only, validates source ids, and appends a non-empty `om.observations.recorded` entry. If there is nothing worth recording, it writes no entry and the raw range remains eligible for a later observer run.
+It receives raw/source entries only and reports a Recorded, Empty, or Failed outcome. Recorded appends a non-empty `om.observations.recorded` entry. Explicit Empty appends `om.observer.completed` without creating observations. Both advance Observation Coverage. Failed appends no coverage marker, remains visible as an error, and leaves the range eligible for another observer run.
 
 ### Reflector
 
@@ -88,20 +88,27 @@ The dropper can only drop active observation ids. It cannot rewrite or merge obs
 
 ### Compaction hook
 
-The compaction hook runs during `session_before_compact`. In V3 it is deterministic and model-free:
+The compaction hook runs during `session_before_compact`. It first decides Compaction Authority by comparing source-backed Observation Coverage with the Pruned Source Boundary.
+
+When observational memory has authority, the hook is deterministic and model-free:
 
 - it does not run observer, reflector, or dropper;
 - it does not call a model;
 - it does not wait for background memory workers;
 - it folds/projects ledger state and renders the summary.
 
-This is the main reason V3 compactions should feel instantaneous compared with V2.
+When coverage is short or cannot be proved safe, the hook returns no override and does not cancel. Pi or another handler can then summarize the uncovered source. The covered path remains fast; the fallback path may use Pi's summarization model.
 
 ## Ledger entries
 
-V3 uses three custom memory ledger entry types:
+V3 uses four custom coverage and memory ledger entry types:
 
 ```ts
+om.observer.completed: {
+  outcome: "empty";
+  coversUpToId: string;
+}
+
 om.observations.recorded: {
   observations: Observation[];
   coversUpToId: string;
@@ -134,7 +141,7 @@ Old V2 memory entry/details formats are ignored.
 
 ## `coversUpToId`
 
-`coversUpToId` is a progress watermark. It tells V3 where a worker's raw/source-token progress has reached.
+`coversUpToId` is a progress watermark. It tells V3 where a worker's raw/source-token progress has reached. Observation Coverage is the greatest valid source boundary from a Recorded `om.observations.recorded` entry or an explicit Empty `om.observer.completed` entry.
 
 It is not:
 
@@ -150,8 +157,8 @@ Progress counting uses raw/source tokens after the marker. Raw/source entries ar
 
 V3 distinguishes visible memory, full memory, and the drift between them:
 
-- **Visible memory** — what the latest `om.folded` compaction details made visible to the agent. This is what `/om:view` shows by default.
-- **Full memory** — full V3 ledger truth folded at the branch tip. This is what `/om:view full` shows.
+- **Visible memory** — structured memory in the latest compaction entry. Valid `om.folded` details are visible; a latest native or non-OM compaction has no visible structured observational memory. This is what `/om:view` shows by default.
+- **Full memory** — full V3 ledger truth folded at the branch tip. Native fallback does not remove it. This is what `/om:view full` shows.
 - **Drift** — the difference between visible and full memory. Use `/om:status` to inspect visible-vs-full drift.
 
 Visible and full memory can differ intentionally. Background ledger work may happen after the latest compaction, and normal compactions may avoid re-folding reflection/drop effects until full-fold pressure requires it.
@@ -201,6 +208,9 @@ When upgrading from V2, update settings and start a new clean session.
 | Full memory | Full V3 ledger truth folded at branch tip or another boundary. |
 | Full fold | Compaction mode that folds observations, reflections, and drops through the boundary. |
 | Progress watermark | `coversUpToId`; marker used for raw-token progress clocks. |
+| Observation Coverage | Greatest source boundary trustworthily evaluated by a Recorded or explicit Empty observer outcome. |
+| Pruned Source Boundary | Final source entry the current compaction will newly remove from active context. |
+| Compaction Authority | Decision about whether observational memory or Pi's compaction pipeline may provide the summary. |
 | Observer | Background agent that records observations. |
 | Reflector | Background agent that records durable reflections. |
 | Dropper | Background agent that drops active observations by id. |

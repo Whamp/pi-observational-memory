@@ -75,6 +75,66 @@ describe("session-ledger V3 projections", () => {
 		expect(visibleProjection(entries)).toEqual({ observations: [obs2], reflections: [ref1] });
 	});
 
+	it("reports no structured memory when a native compaction follows an OM compaction", () => {
+		const obs = observation("aaaaaaaaaaaa");
+		const ref = reflection("eeeeeeeeeeee", ["aaaaaaaaaaaa"]);
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			observationsRecordedEntry("om-observation", { observations: [obs], coversUpToId: "raw-1" }),
+			reflectionsRecordedEntry("om-reflection", { reflections: [ref], coversUpToId: "raw-1" }),
+			compactionEntry("cmp-om", {
+				firstKeptEntryId: "raw-1",
+				details: memoryDetails({ observations: [obs], reflections: [ref] }),
+			}),
+			textCustomMessage("raw-2", "bbbb"),
+			compactionEntry("cmp-native", { firstKeptEntryId: "raw-2" }),
+		];
+
+		expect(visibleProjection(entries)).toEqual({ observations: [], reflections: [] });
+		expect(fullProjection(entries)).toEqual({ observations: [obs], reflections: [ref] });
+	});
+
+	it.each([
+		{
+			name: "native to native",
+			compactions: [
+				compactionEntry("cmp-native-1", { firstKeptEntryId: "raw-1" }),
+				compactionEntry("cmp-native-2", { firstKeptEntryId: "raw-1" }),
+			],
+			expectedIds: [],
+		},
+		{
+			name: "native to OM",
+			compactions: [
+				compactionEntry("cmp-native", { firstKeptEntryId: "raw-1" }),
+				compactionEntry("cmp-om", {
+					firstKeptEntryId: "raw-1",
+					details: memoryDetails({ observations: [observation("bbbbbbbbbbbb")] }),
+				}),
+			],
+			expectedIds: ["bbbbbbbbbbbb"],
+		},
+		{
+			name: "OM to native to OM",
+			compactions: [
+				compactionEntry("cmp-om-1", {
+					firstKeptEntryId: "raw-1",
+					details: memoryDetails({ observations: [observation("aaaaaaaaaaaa")] }),
+				}),
+				compactionEntry("cmp-native", { firstKeptEntryId: "raw-1" }),
+				compactionEntry("cmp-om-2", {
+					firstKeptEntryId: "raw-1",
+					details: memoryDetails({ observations: [observation("bbbbbbbbbbbb")] }),
+				}),
+			],
+			expectedIds: ["bbbbbbbbbbbb"],
+		},
+	])("follows the latest compaction for $name visibility", ({ compactions, expectedIds }) => {
+		const entries = [textCustomMessage("raw-1", "aaaa"), ...compactions];
+
+		expect(visibleProjection(entries).observations.map((entry) => entry.id)).toEqual(expectedIds);
+	});
+
 	it("ignores old V2 compaction details for visible projection", () => {
 		const entries = [
 			textCustomMessage("raw-1", "aaaa"),

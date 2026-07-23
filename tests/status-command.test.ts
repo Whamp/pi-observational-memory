@@ -97,6 +97,29 @@ describe("V3 /om:status", () => {
 		expect(output).not.toContain("observational-memory");
 	});
 
+	it("reports durable memory as drift after a newer native compaction", async () => {
+		const obs = observation("aaaaaaaaaaaa", { tokenCount: 5 });
+		const ref = reflection("eeeeeeeeeeee", ["aaaaaaaaaaaa"], { tokenCount: 3 });
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			observationsRecordedEntry("om-observation", { observations: [obs], coversUpToId: "raw-1" }),
+			reflectionsRecordedEntry("om-reflection", { reflections: [ref], coversUpToId: "raw-1" }),
+			compactionEntry("cmp-om", {
+				firstKeptEntryId: "raw-1",
+				details: memoryDetails({ observations: [obs], reflections: [ref] }),
+			}),
+			textCustomMessage("raw-2", "bbbb"),
+			compactionEntry("cmp-native", { firstKeptEntryId: "raw-2" }),
+		];
+
+		const output = await setup({ entries }).run();
+
+		expect(output).toContain("Observations: 1 recorded / 0 dropped / 1 active / 0 visible +1");
+		expect(output).toContain("Reflections:  1 recorded / 0 visible +1");
+		expect(output).toContain("Visible observation pool: ~0 / 40 tokens (0%)");
+		expect(output).toContain("Active observation pool: ~5 / 20 target tokens (25%)");
+	});
+
 	it("shows separate progress clocks, visible pool, active observation pool, and reflection pool", async () => {
 		const obs = observation("aaaaaaaaaaaa", { tokenCount: 5 });
 		const ref = reflection("eeeeeeeeeeee", ["aaaaaaaaaaaa"], { tokenCount: 3 });

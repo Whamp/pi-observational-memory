@@ -33,7 +33,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:properties": "vitest run tests/*properties.test.ts",
-    "prototype:auto-compaction": "node src/hooks/__prototype_auto_compaction_continue.mjs"
+    "test:runtime-compaction": "vitest run tests/compaction-runtime.integration.test.ts"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",
