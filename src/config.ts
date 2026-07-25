@@ -10,7 +10,7 @@ export interface ConfiguredModel {
 }
 
 export type StageName = "observer" | "reflector" | "dropper";
-export type CompactionTrigger = "auto" | "native" | "agentEnd";
+export type CompactionTrigger = "auto" | "native" | "agentEnd" | "betweenTurns";
 export type EffectiveCompactionTrigger = Exclude<CompactionTrigger, "auto">;
 
 export interface StageModelConfig {
@@ -93,7 +93,7 @@ export function resolveCompactAfterTokens(config: Config, contextWindow: number 
 }
 
 export const THINKING_LEVEL_VALUES: readonly ModelThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
-export const COMPACTION_TRIGGER_VALUES: readonly CompactionTrigger[] = ["auto", "native", "agentEnd"] as const;
+export const COMPACTION_TRIGGER_VALUES: readonly CompactionTrigger[] = ["auto", "native", "agentEnd", "betweenTurns"] as const;
 
 const SETTINGS_KEY = "observational-memory";
 const PASSIVE_ENV = "PI_OBSERVATIONAL_MEMORY_PASSIVE";
@@ -253,6 +253,7 @@ export function resolveEffectiveCompactionTrigger(
 ): EffectiveCompactionTrigger {
 	if (config.compactionTrigger === "native") return "native";
 	if (config.compactionTrigger === "agentEnd") return "agentEnd";
+	if (config.compactionTrigger === "betweenTurns") return "betweenTurns";
 	return mode === "print" || mode === "json" ? "native" : "agentEnd";
 }
 

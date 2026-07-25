@@ -192,6 +192,17 @@ describe("V3 /om:status", () => {
 		expect(output).not.toContain("/ 30 tokens");
 	});
 
+	it("shows between-turn compaction with normal threshold progress", async () => {
+		const output = await setup({
+			entries: [textCustomMessage("raw-1", "aaaaaaaa")],
+			mode: "json",
+			runtime: { config: { observeAfterTokens: 10, reflectAfterTokens: 20, compactAfterTokens: 30, compactionTrigger: "betweenTurns", observationsPoolMaxTokens: 40, observationsPoolTargetTokens: 20, passive: false } },
+		}).run();
+
+		expect(output).toContain("Compaction trigger: betweenTurns (effective: betweenTurns in json mode)");
+		expect(output).toContain("Next compaction:  ~2 / 30 tokens (7%)");
+	});
+
 	it("shows passive mode, consolidation in flight, compaction in flight, and stage-specific last errors", async () => {
 		const output = await setup({
 			entries: [],

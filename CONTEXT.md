@@ -27,3 +27,11 @@ _Avoid_: First kept entry, compaction entry
 **Compaction Authority**:
 The decision about who may provide one prepared compaction summary. Observational memory has authority only when trustworthy source-backed Observation Coverage reaches the Pruned Source Boundary; otherwise the host compaction pipeline has authority.
 _Avoid_: Compaction trigger, passive-mode policy
+
+**Between-turn compaction**:
+Proactive compaction at a tool-bearing turn boundary where work is already expected to continue.
+_Avoid_: Mid-turn compaction, terminal compaction
+
+**Automatic continuation signal**:
+A hidden, one-shot custom message tied to one successful Between-turn compaction in the same session.
+_Avoid_: Synthetic user prompt, continuation loop

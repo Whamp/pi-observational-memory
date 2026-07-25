@@ -77,6 +77,7 @@ describe("config, type, and serialization property invariants", () => {
 				// Assert
 				if (compactionTrigger === "native") expect(effective).toBe("native");
 				else if (compactionTrigger === "agentEnd") expect(effective).toBe("agentEnd");
+				else if (compactionTrigger === "betweenTurns") expect(effective).toBe("betweenTurns");
 				else expect(effective).toBe(mode === "print" || mode === "json" ? "native" : "agentEnd");
 			}),
 			PROPERTY_OPTIONS,

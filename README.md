@@ -230,7 +230,19 @@ Most users can start with the defaults and tune only if they have a specific rea
 
 ### Choosing who triggers compaction
 
-For eval harnesses and `pi -p`, prefer Pi's native auto-compaction timing so Pi can compact and continue inside its own retry path:
+`betweenTurns` is an opt-in proactive policy for tool-heavy work. When raw/source tokens reach the configured threshold after a tool-bearing turn, the extension aborts the otherwise expected next model call, compacts after Pi settles, and sends one hidden continuation signal in the same session:
+
+```json
+{
+  "observational-memory": {
+    "compactionTrigger": "betweenTurns"
+  }
+}
+```
+
+The submitted prompt stays pending through repeated compaction-and-continuation cycles, including in text and JSON print mode. Terminal assistant responses never start a cycle. Queued steering or follow-up messages take precedence, and successful uncovered compaction still uses Pi's native summarizer through the existing Compaction Authority fallback.
+
+For eval harnesses and `pi -p`, prefer Pi's native auto-compaction timing when you want Pi to compact only through its own threshold or overflow path:
 
 ```json
 {
@@ -256,8 +268,8 @@ models.
 
 On a large-context model (e.g. 1M tokens) the calibrated default preempts
 compaction at ~81K, wasting most of the window. When the effective trigger is
-`agentEnd`, switch to `"ratio"` mode to scale the threshold with the active
-model's `contextWindow`:
+`agentEnd` or `betweenTurns`, switch to `"ratio"` mode to scale the threshold with
+the active model's `contextWindow`:
 
 ```json
 {
@@ -291,10 +303,10 @@ the extension owns compaction timing.
 | --------------------------- | ------------- | ------------------------------------------------------------------------------------------------- |
 | `observeAfterTokens`        | `10000`       | Raw/source token threshold for observation runs.                                                  |
 | `reflectAfterTokens`        | `20000`       | Raw/source token threshold for reflection runs; successful reflection creates dropper opportunities. |
-| `compactAfterTokens`        | `81000`       | Raw/source token threshold for extension-triggered compaction when effective trigger is `agentEnd`; used directly in `"calibrated"` mode and as the fallback in `"ratio"` mode. |
+| `compactAfterTokens`        | `81000`       | Raw/source token threshold for extension-triggered compaction when effective trigger is `agentEnd` or `betweenTurns`; used directly in `"calibrated"` mode and as the fallback in `"ratio"` mode. |
 | `compactAfterTokensMode`    | `"calibrated"`| `"calibrated"` uses `compactAfterTokens` directly. `"ratio"` scales the threshold by the active model's `contextWindow`. Ignored when the effective trigger is `native`. |
 | `compactAfterTokensRatio`   | `0.68`        | In `"ratio"` mode, the threshold is `floor(contextWindow * ratio)`. Must be in `(0, 1)`. |
-| `compactionTrigger`         | `auto`        | `auto`, `native`, or `agentEnd`; controls whether the extension proactively calls `ctx.compact()`. Every mode still uses Compaction Authority. |
+| `compactionTrigger`         | `auto`        | `auto`, `native`, `agentEnd`, or opt-in `betweenTurns`; controls whether and when the extension proactively calls `ctx.compact()`. Every mode still uses Compaction Authority. |
 | `observationsPoolMaxTokens` | `20000`       | Observation-token budget used for compaction full-fold pressure.                                  |
 | `observationsPoolTargetTokens` | half of max | Active observation target used by post-reflection dropper maintenance.                            |
 | `agentMaxTurns`             | `16`          | Shared turn cap for background memory-agent loops.                                                |
@@ -348,7 +360,8 @@ flowchart TD
     Observe[Capture observations]
     Reflect[Distill reflections]
     AgentEnd[agent_end]
-    Trigger[extension auto-compaction trigger]
+    Trigger[agentEnd compaction trigger]
+    Between[betweenTurns boundary trigger]
     Native[Pi native/manual compaction]
     Compact[session_before_compact]
     Authority{Coverage reaches prune boundary?}
@@ -357,6 +370,7 @@ flowchart TD
 
     Turn -->|observation due| Observe
     Turn -->|reflection due| Reflect
+    Turn -->|tool-bearing, due, effective trigger betweenTurns| Between --> Compact
     AgentEnd -->|compactAfterTokens and effective trigger agentEnd| Trigger --> Compact
     Native --> Compact
     Compact --> Authority
@@ -371,7 +385,8 @@ The high-level lifecycle:
 3. Durable reflections are distilled in the background.
 4. When compaction time arrives, the extension checks whether Observation Coverage reaches the Pruned Source Boundary.
 5. Covered source uses the prepared OM summary. Uncovered source delegates to Pi's compaction pipeline.
-6. The agent continues with covered memory or a native summary plus the kept tail.
+6. With `betweenTurns`, one successful feature-triggered compaction sends a hidden one-shot continuation signal in the same session.
+7. The agent continues with covered memory or a native summary plus the kept tail.
 
 The important part: prepared memory stays fast without letting incomplete coverage suppress Pi's fallback.
 
@@ -384,6 +399,7 @@ Current behavior:
 * **Observation-centered memory.** The extension records useful session observations while you work.
 * **Durable reflections.** The extension distills stable facts that help the agent stay oriented over time.
 * **Coverage-gated compaction.** `session_before_compact` never waits for background workers. Covered source renders prepared memory without a model call; uncovered source delegates to Pi's compaction pipeline.
+* **Opt-in between-turn continuation.** A due tool-bearing turn can compact and resume automatically in the same session; terminal turns and Pi-owned threshold or overflow compaction add no continuation signal.
 * **Background memory work.** Observation and reflection work run from `turn_end` when their token clocks are due; dropper work runs only after successful reflection and prunes the folded active observation ledger toward `observationsPoolTargetTokens`.
 * **Source-backed recall.** Observations and reflections can be traced back through the `recall` tool.
 * **Visible/full views.** `/om:view` shows structured memory from the latest OM compaction; it is empty after a latest native compaction. `/om:view full` still shows durable branch memory. Use `/om:status` for drift and the separate visible versus active observation pools.
@@ -406,7 +422,7 @@ What this means in practice:
 | V2 setting                   | V3 setting                                              | What to do                                                                                                                                     |
 | ---------------------------- | ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | `observationThresholdTokens` | `observeAfterTokens`                                    | Rename. Same rough role: observation cadence based on raw/source tokens.                                                                       |
-| `compactionThresholdTokens`  | `compactAfterTokens`                                    | Rename. Same rough role only when the effective `compactionTrigger` is `agentEnd`; native timing uses Pi's top-level `compaction` settings.       |
+| `compactionThresholdTokens`  | `compactAfterTokens`                                    | Rename. Same rough role when the effective `compactionTrigger` is `agentEnd` or `betweenTurns`; native timing uses Pi's top-level `compaction` settings.       |
 | `reflectionThresholdTokens`  | `reflectAfterTokens`, `observationsPoolMaxTokens`, and/or `observationsPoolTargetTokens` | Split. Use `reflectAfterTokens` for reflection scheduling, `observationsPoolMaxTokens` for compaction full-fold pressure, and `observationsPoolTargetTokens` for dropper active observation maintenance. |
 | `compactionModel`            | `model`                                                 | Move `{ provider, id }` to `model`.                                                                                                            |
 | `thinkingLevel`              | `model.thinking`                                        | Move under `model`.                                                                                                                            |

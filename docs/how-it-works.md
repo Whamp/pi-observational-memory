@@ -12,6 +12,7 @@ V3 is ledger-centered: memory state is reconstructed by folding V3 ledger entrie
 |---|---|
 | `turn_end` observer trigger | Maybe run the observer in the background. |
 | `turn_end` reflect/drop trigger | Maybe run the due reflector, then run dropper maintenance only after same-run successful reflection. |
+| `turn_end` between-turn compaction trigger | With opt-in `betweenTurns`, abort after due tool work so compaction can run once Pi settles. |
 | `agent_end` compaction trigger | Maybe call `ctx.compact()` when effective `compactionTrigger` is `agentEnd`, Pi is idle, and raw/source tokens are over `compactAfterTokens`. |
 | `session_before_compact` hook | Decide Compaction Authority; render a deterministic V3 summary when covered or delegate when uncovered. |
 | `/om:status` | Show ledger counts, drift, progress clocks, and worker state. |
@@ -37,7 +38,10 @@ flowchart TD
 
     TriggerMode{effective compactionTrigger<br/>agentEnd?}
     CompactDue{raw tokens since compaction<br/>≥ compactAfterTokens<br/>and idle?}
+    BetweenDue{effective betweenTurns,<br/>tool-bearing, due, queue empty?}
+    AbortSettle[abort next call<br/>wait for agent_settled]
     CompactCall[ctx.compact]
+    Continue[hidden same-session<br/>continuation signal]
     Native[Pi native/manual compaction]
 
     Authority{Observation Coverage reaches<br/>Pruned Source Boundary?}
@@ -59,11 +63,15 @@ flowchart TD
     AE --> TriggerMode
     TriggerMode -- yes --> CompactDue
     CompactDue -- yes --> CompactCall
+    TE --> BetweenDue
+    BetweenDue -- yes --> AbortSettle --> CompactCall
     CompactCall --> SBC
     Native --> SBC
     SBC --> Authority
     Authority -- yes --> Fold --> Render --> Details
     Authority -- no --> Delegate --> PiSummary
+    Details -. successful betweenTurns .-> Continue
+    PiSummary -. successful betweenTurns .-> Continue
 ```
 
 The observer has priority. Reflect/drop does not run on a turn where observer work is due.
@@ -85,7 +93,7 @@ Every V3 ledger entry has `data.coversUpToId`. That field is a progress and proj
 | Observer | greatest valid Recorded `om.observations.recorded` or Empty `om.observer.completed` source boundary |
 | Reflector | latest `om.reflections.recorded.data.coversUpToId` |
 | Dropper | latest `om.observations.dropped.data.coversUpToId` |
-| Auto-compaction | latest compaction boundary |
+| Proactive compaction | latest compaction boundary |
 
 The watermark is also used to decide whether a memory ledger entry belongs to a bounded projection. It is not provenance. Provenance lives in `sourceEntryIds` and `supportingObservationIds`.
 
@@ -214,14 +222,15 @@ Reflect/drop also runs on `turn_end`, but only when the observer is not due.
 
 Reflector no-output and reflector failure skip same-turn dropper. Dropper failure does not roll back already-appended reflections.
 
-## Auto-compaction trigger
+## Proactive compaction triggers
 
-The proactive extension trigger runs on `agent_end` only when the effective `compactionTrigger` is `agentEnd`.
+The extension supports two proactive timings. `agentEnd` preserves the legacy post-run trigger. Opt-in `betweenTurns` compacts after due tool work and resumes the same submitted prompt.
 
 Effective trigger policy:
 
 - `native`: never call extension `ctx.compact()` proactively.
 - `agentEnd`: use the legacy `agent_end` threshold trigger.
+- `betweenTurns`: use the tool-bearing `turn_end` → idle `agent_settled` trigger in every Pi mode.
 - `auto`: use `native` in `print` and `json`; use `agentEnd` in `tui`, `rpc`, and unknown interactive modes.
 
 When the effective trigger is `agentEnd`, it skips when:
@@ -235,9 +244,24 @@ When the effective trigger is `agentEnd`, it skips when:
 
 When all checks pass, it calls `ctx.compact()`.
 
-When the effective trigger is `native`, `compactAfterTokens` is ignored and Pi's own top-level compaction settings decide timing. Pi native and manual compactions still run the V3 authority check. The extension customizes covered compactions and delegates uncovered compactions.
+When the effective trigger is `betweenTurns`, a cycle starts only after a tool-bearing turn when no steering or follow-up message is queued, no compaction is active, and the captured threshold is due. The trigger requests one abort, waits for idle `agent_settled`, and invokes the same manual `ctx.compact()` path. Terminal assistant turns never arm a cycle.
 
-This trigger does not wait for observer, reflector, or dropper promises. That is intentional: background memory work should never make compaction feel stuck.
+A successful cycle sends one hidden custom message:
+
+```ts
+customType: "om.compaction.continue"
+content: "Continue the interrupted work from the compacted context."
+display: false
+options: { triggerTurn: true }
+```
+
+The message carries a unique token and the persisted compaction entry id in `details`. Its matching `message_start` consumes the token and returns the trigger to idle, so resumed tool work can earn another cycle. The parent `agent_settled` handler waits for the nested continuation's settlement. This nesting keeps TUI, RPC, text print, and JSON print runs alive through any number of independently earned cycles without an unconditional loop.
+
+The continuation requires four proofs: the manual compaction callback completed; a manual non-retrying `session_compact` event arrived during this cycle; the latest branch compaction is new and matches the callback boundary; and raw tokens after that boundary are below the threshold captured at `turn_end`. Pi 0.81 can report an older event entry when deterministic summaries repeat, so the latest branch entry—not the event entry id—proves persistence. Failed proof reports one invariant error and sends no signal.
+
+When the effective trigger is `native`, `compactAfterTokens` is ignored and Pi's own top-level compaction settings decide timing. Pi native and manual compactions still run the V3 authority check. The extension customizes covered compactions and delegates uncovered compactions. Native threshold and overflow recovery never create an Automatic continuation signal.
+
+Neither proactive trigger waits for observer, reflector, or dropper promises. That is intentional: background memory work should never make compaction feel stuck.
 
 ## Compaction hook
 
@@ -348,6 +372,8 @@ Recall ignores old V2 memory by construction because it indexes only V3 ledger e
 - Invalid source/support/drop ids are filtered or rejected by code.
 - Background worker errors are recorded on runtime state and surfaced in `/om:status`.
 - Compaction does not wait for background workers; it folds whatever ledger state is already present.
+- Between-turn cancellation, errors, stale sessions, send failure, and shutdown clear the private cycle and release settlement waiters.
+- Wrong or duplicate continuation tokens do nothing; shutdown releases pending and active nested waiters in LIFO order.
 - Historical or invalid coverage markers are tolerated by progress helpers instead of throwing.
 
 ## V2 behavior
@@ -359,6 +385,8 @@ V3 does not use V2 state shapes. Old V2 custom memory entries, old V2 compaction
 - The branch-local V3 ledger is the memory source of truth.
 - The latest Pi compaction entry determines visible structured memory.
 - Covered OM compaction is deterministic and model-free; uncovered compaction delegates to the host pipeline.
+- Between-turn continuation follows only a successful feature-triggered manual compaction with persisted headroom.
+- Pi-owned threshold and overflow compaction never emit an Automatic continuation signal.
 - Observer input is raw/source entries only.
 - `coversUpToId` is a progress/projection watermark, not provenance.
 - Kept observations and reflections are rendered without paraphrase.

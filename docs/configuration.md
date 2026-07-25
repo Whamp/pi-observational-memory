@@ -56,8 +56,8 @@ You can omit everything. Defaults work for ordinary sessions, and if `model` is 
 |---|---:|---:|---|
 | `observeAfterTokens` | positive integer | `10000` | Raw/source token threshold for observer runs. |
 | `reflectAfterTokens` | positive integer | `20000` | Raw/source token threshold for reflector runs; successful reflection creates dropper maintenance opportunities. |
-| `compactAfterTokens` | positive integer | `81000` | Raw/source token threshold for proactive extension-triggered compaction when the effective `compactionTrigger` is `agentEnd`. |
-| `compactionTrigger` | `auto`, `native`, or `agentEnd` | `auto` | Whether the extension proactively calls `ctx.compact()`. Every mode still uses Compaction Authority. |
+| `compactAfterTokens` | positive integer | `81000` | Raw/source token threshold for proactive extension-triggered compaction when the effective `compactionTrigger` is `agentEnd` or `betweenTurns`. |
+| `compactionTrigger` | `auto`, `native`, `agentEnd`, or `betweenTurns` | `auto` | Whether and when the extension proactively calls `ctx.compact()`. Every mode still uses Compaction Authority. |
 | `observationsPoolMaxTokens` | positive integer | `20000` | Normal compaction-projection observation-token pressure that makes compaction do a full fold. |
 | `observationsPoolTargetTokens` | positive integer below max | half of `observationsPoolMaxTokens` | Folded active observation target used by post-reflection dropper maintenance. |
 | `agentMaxTurns` | positive integer | `16` | Shared nested-agent turn cap for observer, reflector, and dropper. |
@@ -74,7 +74,7 @@ You can omit everything. Defaults work for ordinary sessions, and if `model` is 
 
 Valid `model.thinking` values are `off`, `minimal`, `low`, `medium`, `high`, and `xhigh`.
 
-Invalid values are ignored. Positive-integer settings must be finite integers greater than zero. `compactionTrigger` must be one of `auto`, `native`, or `agentEnd`. `observationsPoolTargetTokens` must also be below `observationsPoolMaxTokens`; if omitted or invalid, it is derived as `Math.floor(observationsPoolMaxTokens / 2)`.
+Invalid values are ignored. Positive-integer settings must be finite integers greater than zero. `compactionTrigger` must be one of `auto`, `native`, `agentEnd`, or `betweenTurns`. `observationsPoolTargetTokens` must also be below `observationsPoolMaxTokens`; if omitted or invalid, it is derived as `Math.floor(observationsPoolMaxTokens / 2)`.
 
 ## `observeAfterTokens`
 
@@ -98,9 +98,11 @@ Lower values distill reflections more often and therefore create more opportunit
 
 Default: `81000`.
 
-`compactAfterTokens` applies only when the effective `compactionTrigger` is `agentEnd`. In that mode, the proactive extension trigger runs from Pi's `agent_end` hook. It counts raw/source tokens after the latest compaction boundary. If the count reaches `compactAfterTokens`, the extension defers with `setTimeout(0)`, checks that Pi is idle, re-checks the threshold, and calls `ctx.compact()`.
+`compactAfterTokens` applies when the effective `compactionTrigger` is `agentEnd` or `betweenTurns`. `agentEnd` keeps the legacy behavior: the extension counts raw/source tokens after the latest compaction boundary, defers from `agent_end` with `setTimeout(0)`, checks that Pi is idle, re-checks the threshold, and calls `ctx.compact()`.
 
-This trigger does not wait for observer, reflector, or dropper work. Actual ownership is decided later in `session_before_compact`. Covered source uses V3's deterministic, model-free projection. Uncovered source delegates to Pi's compaction pipeline, which may call the configured native summarization model.
+`betweenTurns` checks the same token clock after a tool-bearing `turn_end`. Once due, it aborts the otherwise expected next model call, waits for idle `agent_settled`, and calls `ctx.compact()`. A successful compaction with proven headroom sends one hidden continuation signal in the same session. The originating prompt remains pending through nested cycles, so the policy works in TUI, RPC, text print, and JSON print modes. Terminal turns and turns with queued steering or follow-up messages do not arm it.
+
+Neither proactive trigger waits for observer, reflector, or dropper work. Actual ownership is decided later in `session_before_compact`. Covered source uses V3's deterministic, model-free projection. Uncovered source delegates to Pi's compaction pipeline, which may call the configured native summarization model; successful fallback still continues a `betweenTurns` cycle.
 
 When the effective trigger is `native`, `compactAfterTokens` is ignored and Pi's own top-level `compaction` settings control when compaction happens. Pi's manual compaction also still runs the V3 `session_before_compact` hook.
 
@@ -108,15 +110,16 @@ When the effective trigger is `native`, `compactAfterTokens` is ignored and Pi's
 
 Default: `auto`.
 
-`compactionTrigger` controls only whether this extension proactively calls `ctx.compact()`. It does not disable the V3 compaction hook. Every `session_before_compact` event runs the same Compaction Authority check. The hook returns an observational-memory summary only when Observation Coverage reaches the Pruned Source Boundary; otherwise it returns no override and does not cancel.
+`compactionTrigger` controls whether and when this extension proactively calls `ctx.compact()`. It does not disable the V3 compaction hook. Every `session_before_compact` event runs the same Compaction Authority check. The hook returns an observational-memory summary only when Observation Coverage reaches the Pruned Source Boundary; otherwise it returns no override and does not cancel.
 
 Modes:
 
 - `auto`: use Pi native compaction timing in `print` and `json` modes; use the legacy `agent_end` trigger in `tui`, `rpc`, and unknown interactive modes.
 - `native`: never call extension `ctx.compact()` proactively. Pi's native top-level compaction settings decide timing. V3 supplies covered summaries and delegates uncovered source.
 - `agentEnd`: preserve the previous proactive behavior exactly: after `agent_end`, if raw/source tokens since the last compaction reach `compactAfterTokens` and Pi is idle, call `ctx.compact()`.
+- `betweenTurns`: opt in to proactive compaction after a due tool-bearing turn. Abort at the boundary, compact after settlement, then send one hidden same-session continuation signal only after successful compaction and headroom proof.
 
-For eval harnesses and `pi -p`, prefer native timing so Pi can use its own auto-compaction-and-continue path:
+For eval harnesses and `pi -p`, use `betweenTurns` when one submitted prompt must compact and keep working automatically. Prefer native timing when Pi should own threshold and overflow continuation:
 
 ```json
 {
@@ -296,7 +299,7 @@ V3 is not backwards compatible with V2 settings. Old keys are silently ignored a
 | V2 setting | V3 setting | Migration note |
 |---|---|---|
 | `observationThresholdTokens` | `observeAfterTokens` | Rename. Same rough observer-cadence role. |
-| `compactionThresholdTokens` | `compactAfterTokens` | Rename. Same rough proactive-compaction role only when the effective `compactionTrigger` is `agentEnd`; native timing uses Pi's top-level `compaction` settings. |
+| `compactionThresholdTokens` | `compactAfterTokens` | Rename. Same rough proactive-compaction role when the effective `compactionTrigger` is `agentEnd` or `betweenTurns`; native timing uses Pi's top-level `compaction` settings. |
 | `reflectionThresholdTokens` | `reflectAfterTokens`, `observationsPoolMaxTokens`, and/or `observationsPoolTargetTokens` | Split. Use `reflectAfterTokens` for reflector cadence, `observationsPoolMaxTokens` for compaction full-fold pressure, and `observationsPoolTargetTokens` for dropper active observation maintenance. |
 | `compactionModel` | `model` | Move `{ provider, id }` under `model`. |
 | `thinkingLevel` | `model.thinking` | Move under `model`. |

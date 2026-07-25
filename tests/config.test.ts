@@ -10,7 +10,7 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
 	getAgentDir: () => mock.agentDir,
 }));
 
-import { DEFAULTS, loadConfig, readEnvConfig, resolveCompactAfterTokens, resolveStageModel, resolveStageModelConfig, resolveStageThinking, type Config, type StageModelConfig } from "../src/config.js";
+import { DEFAULTS, loadConfig, readEnvConfig, resolveCompactAfterTokens, resolveStageModel, resolveStageModelConfig, resolveStageThinking, type Config } from "../src/config.js";
 
 function writeJson(path: string, value: unknown) {
 	mkdirSync(join(path, ".."), { recursive: true });
@@ -87,6 +87,29 @@ describe("V3 config", () => {
 			passive: true,
 			debugLog: true,
 		});
+	});
+
+	it("loads betweenTurns compaction from global and project settings", () => {
+		writeJson(join(agentDir, "settings.json"), {
+			"observational-memory": {
+				compactionTrigger: "betweenTurns",
+			},
+		});
+
+		expect(loadConfig(cwd, {})).toMatchObject({ compactionTrigger: "betweenTurns" });
+
+		writeJson(join(agentDir, "settings.json"), {
+			"observational-memory": {
+				compactionTrigger: "native",
+			},
+		});
+		writeJson(join(cwd, ".pi", "settings.json"), {
+			"observational-memory": {
+				compactionTrigger: "betweenTurns",
+			},
+		});
+
+		expect(loadConfig(cwd, {})).toMatchObject({ compactionTrigger: "betweenTurns" });
 	});
 
 	it("loads the worker notification preference", () => {
