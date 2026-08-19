@@ -12,11 +12,12 @@ import {
 	oldV2ObservationEntry,
 	reflection,
 	reflectionsRecordedEntry,
+	rawMessage,
 	textCustomMessage,
 	type TestEntry,
 } from "./fixtures/session.js";
 
-function setup(args: { entries: TestEntry[]; runtime?: Partial<any>; mode?: string; model?: unknown }) {
+function setup(args: { entries: TestEntry[]; runtime?: Partial<any>; mode?: string; model?: unknown; contextUsage?: unknown }) {
 	let handler: ((args: unknown, ctx: any) => Promise<void>) | undefined;
 	const pi = {
 		registerCommand: vi.fn((name: string, command: { handler: typeof handler }) => {
@@ -47,7 +48,14 @@ function setup(args: { entries: TestEntry[]; runtime?: Partial<any>; mode?: stri
 	registerStatusCommand(pi as any, runtime as any);
 	if (!handler) throw new Error("status handler not registered");
 	const notify = vi.fn();
-	const ctx = { cwd: "/tmp/project", mode: args.mode, ui: { notify }, sessionManager: { getBranch: () => args.entries }, model: args.model };
+	const ctx = {
+		cwd: "/tmp/project",
+		mode: args.mode,
+		ui: { notify },
+		sessionManager: { getBranch: () => args.entries },
+		model: args.model,
+		getContextUsage: () => args.contextUsage,
+	};
 	const run = async () => {
 		await handler!(undefined, ctx);
 		return notify.mock.calls.at(-1)?.[0] as string;
@@ -89,7 +97,8 @@ describe("V3 /om:status", () => {
 		expect(output).toContain("Observations: 2 recorded / 1 dropped / 1 active / 1 visible +1 -1");
 		expect(output).toContain("Reflections:  1 recorded / 0 visible +1");
 		expect(output).toContain("Visible observation pool: ~5 / 40 tokens (13%)");
-		expect(output).toContain("Active observation pool: ~7 / 20 target tokens (35%)");
+		// Active pool counts the full rendered line (id + timestamp + relevance + content).
+		expect(output).toContain("Active observation pool: ~19 / 20 target tokens (95%)");
 		expect(output).not.toContain("Visible:");
 		expect(output).not.toContain("Drift:");
 		expect(output).not.toContain("full truth");
@@ -117,7 +126,7 @@ describe("V3 /om:status", () => {
 		expect(output).toContain("Observations: 1 recorded / 0 dropped / 1 active / 0 visible +1");
 		expect(output).toContain("Reflections:  1 recorded / 0 visible +1");
 		expect(output).toContain("Visible observation pool: ~0 / 40 tokens (0%)");
-		expect(output).toContain("Active observation pool: ~5 / 20 target tokens (25%)");
+		expect(output).toContain("Active observation pool: ~19 / 20 target tokens (95%)");
 	});
 
 	it("shows separate progress clocks, visible pool, active observation pool, and reflection pool", async () => {
@@ -138,9 +147,10 @@ describe("V3 /om:status", () => {
 		expect(output).toContain("Next reflection:");
 		expect(output).toContain("/ 20 tokens");
 		expect(output).toContain("Next compaction:");
-		expect(output).toContain("/ 30 tokens");
+		expect(output).toContain("/ 30 estimated source tokens");
 		expect(output).toContain("Visible observation pool: ~5 / 40 tokens (13%)");
-		expect(output).toContain("Active observation pool: ~5 / 20 target tokens (25%)");
+		// Active pool counts the full rendered line, unlike the visible pool's stored tokenCount.
+		expect(output).toContain("Active observation pool: ~19 / 20 target tokens (95%)");
 		expect(output).toContain("Reflection pool:         ~3 tokens");
 		expect(output).not.toContain("Observation pool:");
 		expect(output).not.toContain("Full fold pool:");
@@ -162,8 +172,26 @@ describe("V3 /om:status", () => {
 		expect(output).toContain("Next reflection:  ~3 / 20 tokens (15%)");
 	});
 
+	it("shows raw source progress and ignores provider context", async () => {
+		const entries = [
+			compactionEntry("cmp-1", { firstKeptEntryId: "raw-1" }),
+			rawMessage("assistant-1", "done", {
+				message: { role: "assistant", content: "done", stopReason: "end_turn", usage: { totalTokens: 60072 } },
+			}),
+			textCustomMessage("raw-1", "aaaaaaaaaaaa"),
+		];
+
+		const output = await setup({
+			entries,
+			contextUsage: { tokens: 135636, contextWindow: 200000 },
+		}).run();
+
+		expect(output).toContain("Next compaction:  ~3 / 30 estimated source tokens");
+	});
+
 	it("shows over-target active observation pool in the Activity section", async () => {
-		const obs = observation("aaaaaaaaaaaa", { tokenCount: 25 });
+		// Pad content so the rendered line is exactly 25 tokens (100 chars).
+		const obs = observation("aaaaaaaaaaaa", { content: "x".repeat(51) });
 		const entries = [
 			textCustomMessage("raw-1", "aaaaaaaa"),
 			observationsRecordedEntry("om-obs", { observations: [obs], coversUpToId: "raw-1" }),
@@ -200,7 +228,7 @@ describe("V3 /om:status", () => {
 		}).run();
 
 		expect(output).toContain("Compaction trigger: betweenTurns (effective: betweenTurns in json mode)");
-		expect(output).toContain("Next compaction:  ~2 / 30 tokens (7%)");
+		expect(output).toContain("Next compaction:  ~2 / 30 estimated source tokens (7%)");
 	});
 
 	it("shows passive mode, consolidation in flight, compaction in flight, and stage-specific last errors", async () => {
@@ -276,9 +304,32 @@ describe("V3 /om:status", () => {
 					},
 				},
 				model: { contextWindow: 1_000_000 },
+				contextUsage: { tokens: null, contextWindow: 1_000_000 },
 			}).run();
 
-			expect(output).toContain("Next compaction:  ~0 / 500,000 tokens (0%)");
+			expect(output).toContain("Next compaction:  ~0 / 500,000 estimated source tokens (0%)");
+		});
+
+		it("uses model contextWindow in ratio mode", async () => {
+			const output = await setup({
+				entries: [],
+				runtime: {
+					config: {
+						observeAfterTokens: 10,
+						reflectAfterTokens: 20,
+						compactAfterTokens: 30,
+						compactAfterTokensMode: "ratio",
+						compactAfterTokensRatio: 0.5,
+						observationsPoolMaxTokens: 40,
+						observationsPoolTargetTokens: 20,
+						passive: false,
+					},
+				},
+				model: { contextWindow: 100_000 },
+				contextUsage: { tokens: null, contextWindow: 200_000 },
+			}).run();
+
+			expect(output).toContain("Next compaction:  ~0 / 50,000 estimated source tokens (0%)");
 		});
 
 		it("falls back to calibrated threshold when model is unavailable in ratio mode", async () => {
@@ -299,7 +350,7 @@ describe("V3 /om:status", () => {
 				model: undefined,
 			}).run();
 
-			expect(output).toContain("Next compaction:  ~0 / 30 tokens (0%)");
+			expect(output).toContain("Next compaction:  ~0 / 30 estimated source tokens (0%)");
 		});
 
 		it("falls back to calibrated threshold when contextWindow is zero in ratio mode", async () => {
@@ -320,7 +371,7 @@ describe("V3 /om:status", () => {
 				model: { contextWindow: 0 },
 			}).run();
 
-			expect(output).toContain("Next compaction:  ~0 / 30 tokens (0%)");
+			expect(output).toContain("Next compaction:  ~0 / 30 estimated source tokens (0%)");
 		});
 	});
 });

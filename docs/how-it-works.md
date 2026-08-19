@@ -13,7 +13,7 @@ V3 is ledger-centered: memory state is reconstructed by folding V3 ledger entrie
 | `turn_end` observer trigger | Maybe run the observer in the background. |
 | `turn_end` reflect/drop trigger | Maybe run the due reflector, then run dropper maintenance only after same-run successful reflection. |
 | `turn_end` between-turn compaction trigger | With opt-in `betweenTurns`, abort after due tool work so compaction can run once Pi settles. |
-| `agent_end` compaction trigger | Maybe call `ctx.compact()` when effective `compactionTrigger` is `agentEnd`, Pi is idle, and raw/source tokens are over `compactAfterTokens`. |
+| `agent_settled` compaction trigger | When effective `compactionTrigger` is `agentEnd`, maybe call `ctx.compact()` when Pi is idle and raw/source tokens are over `compactAfterTokens`. |
 | `session_before_compact` hook | Decide Compaction Authority; render a deterministic V3 summary when covered or delegate when uncovered. |
 | `/om:status` | Show ledger counts, drift, progress clocks, and worker state. |
 | `/om:view` | Show visible or full memory content and attempt to copy the rendered memory text. |
@@ -24,7 +24,7 @@ V3 is ledger-centered: memory state is reconstructed by folding V3 ledger entrie
 ```mermaid
 flowchart TD
     TE[turn_end]
-    AE[agent_end]
+    AE[agent_settled]
     SBC[session_before_compact]
 
     ObsDue{raw tokens since Observation Coverage<br/>≥ observeAfterTokens?}
@@ -194,14 +194,14 @@ The observer trigger runs on `turn_end`.
 3. Skip if observer work is already in flight.
 4. Count raw/source tokens since latest Observation Coverage.
 5. Skip if below `observeAfterTokens`.
-6. Select and serialize source entries after the latest coverage marker.
+6. Select and serialize the oldest size-capped chunk of source entries after the latest coverage marker; the oldest entry is always included even if it alone exceeds the cap, so a single oversized entry cannot stall coverage.
 7. Resolve the memory model and run `runObserver()` in a background task.
 8. Validate source ids, compute deterministic ids, and classify the result.
 9. If at least one observation is accepted, append `om.observations.recorded` and classify the run as Recorded.
 10. If the observer explicitly reports an empty list with no rejected proposals, append `om.observer.completed` and classify the run as Empty.
 11. If every proposal is rejected or no structured outcome is reported, append no coverage marker and classify the run as Failed.
 
-Recorded and Empty advance Observation Coverage. Failed records an operational error, warns the user, and leaves the source eligible for another observer run.
+Recorded and Empty advance Observation Coverage. Failed records an operational error, warns the user, and leaves the source eligible for another observer run. API/stream failures surface as `observer failed` / `observer.stream_error` rather than as an empty run.
 
 ## Reflect/drop flow
 
@@ -224,7 +224,7 @@ Reflector no-output and reflector failure skip same-turn dropper. Dropper failur
 
 ## Proactive compaction triggers
 
-The extension supports two proactive timings. `agentEnd` preserves the legacy post-run trigger. Opt-in `betweenTurns` compacts after due tool work and resumes the same submitted prompt.
+The extension supports two proactive timings. `agentEnd` preserves the legacy post-run trigger, now scheduled from `agent_settled` after the engine finishes automatic retries, compaction, and queued continuation. Opt-in `betweenTurns` compacts after due tool work and resumes the same submitted prompt.
 
 Effective trigger policy:
 
@@ -237,12 +237,14 @@ When the effective trigger is `agentEnd`, it skips when:
 
 - `passive` is true;
 - compaction is already in flight;
-- the agent end event is a retryable error;
-- raw/source tokens since last compaction are below `compactAfterTokens`;
+- estimated source-entry progress after the latest compaction boundary is below `compactAfterTokens`;
 - Pi is not idle after the deferred check;
-- the threshold is no longer met after the deferred check.
+- the raw threshold is no longer met after the deferred check.
 
-When all checks pass, it calls `ctx.compact()`.
+The count starts at `firstKeptEntryId` when Pi provides that boundary. Memory
+ledger entries and compaction metadata contribute zero. The trigger uses this
+same raw metric before scheduling and in the deferred re-check, then calls
+`ctx.compact()` when all checks pass.
 
 When the effective trigger is `betweenTurns`, a cycle starts only after a tool-bearing turn when no steering or follow-up message is queued, no compaction is active, and the captured threshold is due. The trigger requests one abort, waits for idle `agent_settled`, and invokes the same manual `ctx.compact()` path. Terminal assistant turns never arm a cycle.
 
@@ -270,10 +272,10 @@ The compaction hook runs on `session_before_compact` and is the critical V3 late
 1. Guard against duplicate concurrent compaction hooks.
 2. Load config if needed.
 3. Resolve the Pruned Source Boundary: the final source entry newly removed before `firstKeptEntryId`, after the previous compaction boundary.
-4. Resolve the greatest valid source-backed Observation Coverage from Recorded and explicit Empty outcomes.
+4. Resolve the greatest valid source-backed Observation Coverage from leading and explicit Empty outcomes.
 5. Record the content-free authority decision in debug logs when enabled.
-6. If coverage reaches the prune boundary, build and render the deterministic projection and return `om.folded` details.
-7. Otherwise return no override and no cancellation so Pi or a later handler can summarize the source.
+6. If coverage reaches the boundary, build and render the deterministic projection and return `om.folded` details.
+7. Otherwise return no override and no cancellation so a later handler can summarize the source.
 
 The hook never runs observer, reflector, or dropper work and never waits for worker promises. The covered OM path calls no model. The delegated path may cause Pi to call its native summarization model after the hook returns.
 

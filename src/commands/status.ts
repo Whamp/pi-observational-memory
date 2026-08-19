@@ -72,7 +72,7 @@ export function registerStatusCommand(pi: ExtensionAPI, runtime: Runtime): void 
 			const compactThreshold = resolveCompactAfterTokens(runtime.config, contextWindow);
 			const compactionLine = effectiveCompactionTrigger === "native"
 				? "Next compaction: native Pi compaction timing; compactAfterTokens ignored"
-				: `Next compaction:  ~${compactionProgress.toLocaleString()} / ${compactThreshold.toLocaleString()} tokens (${pct(compactionProgress, compactThreshold)}%)`;
+				: `Next compaction:  ~${compactionProgress.toLocaleString()} / ${compactThreshold.toLocaleString()} estimated source tokens (${pct(compactionProgress, compactThreshold)}%)`;
 
 			const passiveLines = runtime.config.passive === true
 				? [

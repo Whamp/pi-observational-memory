@@ -15,14 +15,6 @@ import {
 } from "../session-ledger/index.js";
 import type { Runtime } from "../runtime.js";
 
-/**
- * Regex matching Pi's internal retryable error detection.
- * When the last assistant message in agent_end has stopReason "error" matching this pattern,
- * Pi will auto-retry — we must not trigger compaction between attempts.
- */
-const RETRYABLE_ERROR_RE =
-	/overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|network.?error|connection.?error|connection.?refused|connection.?lost|websocket.?closed|websocket.?error|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|ended without|http2 request did not get a response|timed? out|timeout|terminated|retry delay/i;
-
 const BETWEEN_TURN_CONTINUATION_TYPE = "om.compaction.continue";
 const BETWEEN_TURN_CONTINUATION_INSTRUCTION = "Continue the interrupted work from the compacted context.";
 const BETWEEN_TURN_INVARIANT_ERROR =
@@ -210,35 +202,20 @@ export function registerCompactionTrigger(pi: ExtensionAPI, runtime: Runtime): v
 		continuation.release();
 	};
 
-	pi.on("agent_end", (event: any, ctx: any) => {
+	// Pi emits agent_settled only after retries, automatic compaction, and queued
+	// continuation have finished, so retry policy stays owned by Pi.
+	pi.on("agent_settled", (_event, ctx) => {
 		runtime.ensureConfig(ctx.cwd);
 		if (runtime.config.passive === true) return;
 		if (runtime.compactInFlight) return;
 		if (resolveEffectiveCompactionTrigger(runtime.config, ctx.mode) !== "agentEnd") return;
 
-		// Don't trigger compaction if Pi will auto-retry — the agent hasn't truly finished.
-		// Pi emits agent_end before its own retry check, so we must detect this ourselves.
-		// The next agent_end (after retry succeeds or exhausts attempts) will re-evaluate.
-		const lastAssistant = [...event.messages].reverse().find(
-			(m): m is Extract<typeof m, { role: "assistant" }> => m.role === "assistant",
-		);
-		if (
-			lastAssistant
-			&& lastAssistant.stopReason === "error"
-			&& lastAssistant.errorMessage
-			&& RETRYABLE_ERROR_RE.test(lastAssistant.errorMessage)
-		) {
-			return;
-		}
-
-		const entries = ctx.sessionManager.getBranch() as Entry[];
-		const tokens = rawTokensSinceLastCompaction(entries);
-		// Resolve the proactive-compaction threshold from the active model's context
-		// window when ratio mode is configured. ctx.model is the current session model
-		// (Model<any> | undefined per ExtensionContext).
+		const entries = ctx.sessionManager?.getBranch?.() as Entry[] | undefined;
+		if (!entries) return;
+		const progress = rawTokensSinceLastCompaction(entries);
 		const contextWindow = typeof ctx.model?.contextWindow === "number" ? ctx.model.contextWindow : undefined;
 		const threshold = resolveCompactAfterTokens(runtime.config, contextWindow);
-		if (tokens < threshold) return;
+		if (progress < threshold) return;
 
 		// Capture ctx properties synchronously — the setTimeout + async work below
 		// may outlive the extension ctx (stale after session replacement/reload).
@@ -246,7 +223,7 @@ export function registerCompactionTrigger(pi: ExtensionAPI, runtime: Runtime): v
 		const ui = ctx.ui;
 
 		if (hasUI) ui?.notify(
-			`Observational memory: compaction threshold reached (~${tokens.toLocaleString()} tokens); triggering compaction`,
+			`Observational memory: compaction threshold reached (~${progress.toLocaleString()} estimated source tokens); triggering compaction`,
 			"info",
 		);
 
@@ -261,9 +238,13 @@ export function registerCompactionTrigger(pi: ExtensionAPI, runtime: Runtime): v
 					);
 					return;
 				}
-				const currentEntries = ctx.sessionManager.getBranch() as Entry[];
-				const currentTokens = rawTokensSinceLastCompaction(currentEntries);
-				if (currentTokens < threshold) {
+				const currentEntries = ctx.sessionManager?.getBranch?.() as Entry[] | undefined;
+				if (!currentEntries) {
+					runtime.compactInFlight = false;
+					return;
+				}
+				const currentProgress = rawTokensSinceLastCompaction(currentEntries);
+				if (currentProgress < threshold) {
 					runtime.compactInFlight = false;
 					if (hasUI) ui?.notify(
 						"Observational memory: compaction skipped — another compaction already ran before deferred compaction",

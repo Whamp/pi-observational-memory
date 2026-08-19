@@ -4,11 +4,12 @@ import { Type } from "@earendil-works/pi-ai";
 import { streamSimple } from "@earendil-works/pi-ai/compat";
 import type { Static } from "typebox";
 import { hashId } from "../../ids.js";
+import { logAgentStreamError } from "../stream-errors.js";
 import { AGENT_LOOP_MAX_TOKENS, boundedMaxTokens } from "../../model-budget.js";
 import { OBSERVER_SYSTEM } from "./prompts.js";
 import { nowTimestamp, truncateRecordContent } from "../../serialize.js";
 import type { Observation, Relevance } from "../../session-ledger/index.js";
-import { estimateStringTokens } from "../../tokens.js";
+import { observationLineTokenCount } from "../../tokens.js";
 
 interface RunObserverArgs {
 	model: Model<any>;
@@ -38,6 +39,7 @@ export type ObserverOutcome =
 	| { outcome: "recorded"; observations: Observation[] }
 	| { outcome: "empty" }
 	| { outcome: "failed"; reason: "rejected_proposals"; rejectedCount: number }
+	| { outcome: "failed"; reason: "stream_error"; stopReason: string; errorMessage?: string }
 	| { outcome: "failed"; reason: "no_structured_outcome" };
 
 const RecordObservationsSchema = Type.Object({
@@ -134,7 +136,12 @@ export async function runObserver(args: RunObserverArgs): Promise<ObserverOutcom
 					timestamp: obs.timestamp,
 					relevance: obs.relevance as Relevance,
 					sourceEntryIds,
-					tokenCount: estimateStringTokens(content),
+					tokenCount: observationLineTokenCount({
+						id,
+						timestamp: obs.timestamp,
+						relevance: obs.relevance,
+						content,
+					}),
 				});
 				added++;
 			}
@@ -204,13 +211,29 @@ ${conversation}`;
 
 	const loop = args.agentLoop ?? agentLoop;
 	const stream = loop(prompts, context, config, signal, streamSimple);
-	for await (const _event of stream) {
+	let streamError: { stopReason: string; errorMessage?: string } | undefined;
+	for await (const event of stream) {
 		// Drain events; the tool's execute already collects records.
+		logAgentStreamError("observer", event);
+		// Watch for a terminal API/stream failure so it is not conflated with
+		// a deliberate empty result.
+		const message = (event as { message?: { role?: string; stopReason?: string; errorMessage?: string } }).message;
+		if (message?.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted")) {
+			streamError = { stopReason: message.stopReason, errorMessage: message.errorMessage };
+		}
 	}
 	await stream.result();
 
 	if (accumulated.size > 0) {
 		return { outcome: "recorded", observations: Array.from(accumulated.values()) };
+	}
+	if (streamError) {
+		return {
+			outcome: "failed",
+			reason: "stream_error",
+			stopReason: streamError.stopReason,
+			errorMessage: streamError.errorMessage,
+		};
 	}
 	if (rejectedCount > 0) {
 		return { outcome: "failed", reason: "rejected_proposals", rejectedCount };

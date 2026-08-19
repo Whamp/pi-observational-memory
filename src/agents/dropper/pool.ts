@@ -1,3 +1,4 @@
+import { observationLineTokenCount } from "../../tokens.js";
 import type { Observation } from "../../session-ledger/index.js";
 
 export type ObservationPoolMetrics = {
@@ -12,8 +13,11 @@ export type ObservationPoolMetrics = {
 	ready: boolean;
 };
 
-export function observationTokenSum(observations: readonly { tokenCount: number }[]): number {
-	return observations.reduce((sum, observation) => sum + observation.tokenCount, 0);
+export function observationTokenSum(observations: readonly Observation[]): number {
+	// Count the full rendered line (id + timestamp + relevance + content), not
+	// bare content: the pool budget caps how much observation text is re-rendered
+	// into future contexts, and every line carries metadata overhead.
+	return observations.reduce((sum, observation) => sum + observationLineTokenCount(observation), 0);
 }
 
 export function observationPoolFullness(observationTokens: number, targetTokens: number): number {

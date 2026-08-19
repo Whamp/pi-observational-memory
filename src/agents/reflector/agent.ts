@@ -5,6 +5,7 @@ import { streamSimple } from "@earendil-works/pi-ai/compat";
 import type { Static } from "typebox";
 import { debugLog } from "../../debug-log.js";
 import { hashId } from "../../ids.js";
+import { logAgentStreamError } from "../stream-errors.js";
 import { AGENT_LOOP_MAX_TOKENS, boundedMaxTokens } from "../../model-budget.js";
 import { truncateRecordContent } from "../../serialize.js";
 import { REFLECTOR_SYSTEM } from "./prompts.js";
@@ -184,8 +185,9 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
 
 	const loop = args.agentLoop ?? agentLoop;
 	const stream = loop(prompts, context, config, signal, streamSimple);
-	for await (const _event of stream) {
+	for await (const event of stream) {
 		// Tool execution collects records.
+		logAgentStreamError("reflector", event);
 	}
 	await stream.result();
 	const acceptedReflections = Array.from(accumulated.values());

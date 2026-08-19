@@ -173,6 +173,8 @@ This extension is especially useful when the session contains decisions that sho
 
 ## Install
 
+Requires Pi 0.81.0 or newer. Proactive compaction uses the `agent_settled` lifecycle event introduced in that release.
+
 ```bash
 pi install npm:pi-observational-memory
 ```
@@ -261,10 +263,10 @@ When the effective trigger is `native`, the extension does not use `compactAfter
 
 ### Scaling extension-triggered compaction to the model's context window
 
-By default `compactAfterTokensMode` is `"calibrated"`, so extension-triggered
-compaction fires at the fixed `compactAfterTokens` value (81,000 by default).
-That is backwards-compatible and works well for typical ~128K–200K context
-models.
+By default `compactAfterTokensMode` is `"calibrated"`, so the proactive
+compaction trigger uses the fixed `compactAfterTokens` estimated source-entry
+threshold (81,000 by default). This preserves the pre-PR #40 compaction metric
+for typical ~128K–200K context models.
 
 On a large-context model (e.g. 1M tokens) the calibrated default preempts
 compaction at ~81K, wasting most of the window. When the effective trigger is
@@ -283,8 +285,11 @@ the active model's `contextWindow`:
 
 In ratio mode the effective threshold is
 `floor(model.contextWindow * compactAfterTokensRatio)` (clamped to a minimum of
-1). With the example above, a 1,000,000-token window compacts at ~500,000 raw
-tokens; a 200,000-token window compacts at ~100,000.
+1). With the example above, a 1,000,000-token window compacts after about
+500,000 estimated source-entry tokens after the latest compaction boundary; a
+200,000-token window uses about 100,000. The threshold counts source entries,
+not Pi's system prompt, tool schemas, or provider accounting. Pi's native
+window-pressure compaction remains independent.
 
 `compactAfterTokensRatio` is user-tunable precisely because **context window ≠
 attention**. Some models advertise a large window but degrade at long range; set
@@ -302,6 +307,7 @@ the extension owns compaction timing.
 | Setting                     | Default       | Meaning                                                                                           |
 | --------------------------- | ------------- | ------------------------------------------------------------------------------------------------- |
 | `observeAfterTokens`        | `10000`       | Raw/source token threshold for observation runs.                                                  |
+| `observerChunkMaxTokens`    | derived       | Max estimated tokens serialized into one observer chunk (minimum `256`). Unset: `floor(contextWindow * 0.2)` of the resolved memory model, or `60000` when the window is unknown. Larger backlogs drain oldest-first; a single over-budget source is sent as a marked head/tail excerpt while the original source remains in the session ledger. |
 | `reflectAfterTokens`        | `20000`       | Raw/source token threshold for reflection runs; successful reflection creates dropper opportunities. |
 | `compactAfterTokens`        | `81000`       | Raw/source token threshold for extension-triggered compaction when effective trigger is `agentEnd` or `betweenTurns`; used directly in `"calibrated"` mode and as the fallback in `"ratio"` mode. |
 | `compactAfterTokensMode`    | `"calibrated"`| `"calibrated"` uses `compactAfterTokens` directly. `"ratio"` scales the threshold by the active model's `contextWindow`. Ignored when the effective trigger is `native`. |
@@ -324,10 +330,11 @@ Valid `model.thinking` values are:
 * `medium`
 * `high`
 * `xhigh`
+* `max`
 
 If no `model` is configured, memory workers use the session model.
 
-Set `showWorkerNotifications` to `false` to hide routine worker start and completion messages. Model resolution warnings, no-output warnings, worker failures, compaction notifications, and explicit `/om:*` command output remain visible.
+Set `showWorkerNotifications` to `false` to hide routine worker start and completion messages (including deliberate-empty observer info messages). Model fallback/unavailability, worker failures (including observer stream errors), compaction notifications, and explicit `/om:*` command output remain visible.
 
 `observationsPoolMaxTokens` and `observationsPoolTargetTokens` intentionally describe different pools. Max tokens control when compaction performs a full fold over visible memory. Target tokens control the folded active observation pool that the dropper maintains after successful reflection. If the target is omitted, it defaults to half of max.
 
@@ -359,7 +366,7 @@ flowchart TD
     Turn[turn_end]
     Observe[Capture observations]
     Reflect[Distill reflections]
-    AgentEnd[agent_end]
+    AgentSettled[agent_settled]
     Trigger[agentEnd compaction trigger]
     Between[betweenTurns boundary trigger]
     Native[Pi native/manual compaction]
@@ -371,7 +378,7 @@ flowchart TD
     Turn -->|observation due| Observe
     Turn -->|reflection due| Reflect
     Turn -->|tool-bearing, due, effective trigger betweenTurns| Between --> Compact
-    AgentEnd -->|compactAfterTokens and effective trigger agentEnd| Trigger --> Compact
+    AgentSettled -->|due and effective trigger agentEnd| Trigger --> Compact
     Native --> Compact
     Compact --> Authority
     Authority -->|yes| Summary
@@ -389,6 +396,12 @@ The high-level lifecycle:
 7. The agent continues with covered memory or a native summary plus the kept tail.
 
 The important part: prepared memory stays fast without letting incomplete coverage suppress Pi's fallback.
+
+The proactive compaction threshold counts estimated source-entry tokens after
+the latest compaction boundary. It includes source entries retained by
+`firstKeptEntryId` and newer source entries, while memory ledger entries and
+compaction metadata contribute zero. `/om:status` uses the same metric. Pi's
+own window-pressure compaction remains independent.
 
 ---
 

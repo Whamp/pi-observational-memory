@@ -14,6 +14,7 @@ import {
 	type ReflectionCoverageTier,
 } from "../src/agents/dropper/agent.js";
 import { summarizeSupportIdCounts } from "../src/agents/reflector/agent.js";
+import { observationLineTokenCount } from "../src/tokens.js";
 import type { Observation, Reflection } from "../src/session-ledger/index.js";
 import {
 	PROPERTY_OPTIONS,
@@ -28,6 +29,14 @@ import {
 const observationsArb = fc
 	.uniqueArray(entryIdArb, { minLength: 1, maxLength: 6 })
 	.chain((sourceIds) => fc.uniqueArray(observationArb(sourceIds), { minLength: 0, maxLength: 16, selector: (observation) => observation.id }));
+
+// Pool token accounting counts the full rendered observation line
+// (id + timestamp + relevance + content), not bare content tokens, so
+// invariants must derive expected sums from observationLineTokenCount
+// rather than the fixture's stored tokenCount (upstream #44).
+function expectedObservationTokens(observations: readonly Observation[]): number {
+	return observations.reduce((sum, observation) => sum + observationLineTokenCount(observation), 0);
+}
 
 const COVERAGE_DROP_RANK: Record<ReflectionCoverageTier, number> = { strong: 0, partial: 1, none: 2 };
 const RELEVANCE_DROP_RANK: Record<Observation["relevance"], number> = { low: 0, medium: 1, high: 2, critical: 3 };
@@ -49,7 +58,7 @@ describe("dropper property invariants", () => {
 		fc.assert(
 			fc.property(observationsArb, fc.integer({ min: -100, max: 5_000 }), (observations, targetTokens) => {
 				// Arrange
-				const expectedTokens = observations.reduce((sum, observation) => sum + observation.tokenCount, 0);
+				const expectedTokens = expectedObservationTokens(observations);
 
 				// Act
 				const metrics = observationPoolMetrics(observations, targetTokens);
@@ -74,7 +83,7 @@ describe("dropper property invariants", () => {
 				// Arrange
 				const lowerTarget = Math.min(a, b);
 				const higherTarget = Math.max(a, b);
-				const observationTokens = observations.reduce((sum, observation) => sum + observation.tokenCount, 0);
+				const observationTokens = expectedObservationTokens(observations);
 
 				// Act
 				const lowerTargetDrops = maxDropCountForPool(observations, observationTokens, lowerTarget);
@@ -91,7 +100,7 @@ describe("dropper property invariants", () => {
 		fc.assert(
 			fc.property(observationsArb, (observations) => {
 				// Arrange
-				const observationTokens = observations.reduce((sum, observation) => sum + observation.tokenCount, 0);
+				const observationTokens = expectedObservationTokens(observations);
 				const targets = [
 					-1,
 					0,

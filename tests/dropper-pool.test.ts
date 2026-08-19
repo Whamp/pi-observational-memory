@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { observationPoolMetrics } from "../src/agents/dropper/pool.js";
+import { observationLineTokenCount } from "../src/tokens.js";
 import { foldLedger } from "../src/session-ledger/index.js";
 import {
 	observation,
@@ -12,13 +13,15 @@ import {
 
 describe("V3 dropper active observation pool metrics", () => {
 	it("reports below-target pools as not ready", () => {
-		const observations = [observation("aaaaaaaaaaaa", { relevance: "low", tokenCount: 20 })];
+		const observations = [observation("aaaaaaaaaaaa", { relevance: "low" })];
 
+		// Pool metrics count the full rendered line (id + timestamp + relevance + content).
+		expect(observationLineTokenCount(observations[0]!)).toBe(18);
 		expect(observationPoolMetrics(observations, 100)).toMatchObject({
-			observationTokens: 20,
+			observationTokens: 18,
 			targetTokens: 100,
 			tokensOverTarget: 0,
-			fullness: 0.2,
+			fullness: 0.18,
 			activeObservationCount: 1,
 			droppableCount: 1,
 			overTarget: false,
@@ -27,9 +30,10 @@ describe("V3 dropper active observation pool metrics", () => {
 	});
 
 	it("reports at-target pools as not ready", () => {
+		// Pad content so each rendered line is exactly 50 tokens (200 chars).
 		const observations = [
-			observation("aaaaaaaaaaaa", { relevance: "low", tokenCount: 50 }),
-			observation("bbbbbbbbbbbb", { relevance: "medium", tokenCount: 50 }),
+			observation("aaaaaaaaaaaa", { relevance: "low", content: "x".repeat(154) }),
+			observation("bbbbbbbbbbbb", { relevance: "medium", content: "x".repeat(151) }),
 		];
 
 		const metrics = observationPoolMetrics(observations, 100);
@@ -43,10 +47,11 @@ describe("V3 dropper active observation pool metrics", () => {
 	});
 
 	it("reports above-target pools as ready with target-return max drops", () => {
+		// Pad content so each rendered line is exactly 50 tokens (200 chars).
 		const observations = [
-			observation("aaaaaaaaaaaa", { relevance: "low", tokenCount: 50 }),
-			observation("bbbbbbbbbbbb", { relevance: "medium", tokenCount: 50 }),
-			observation("cccccccccccc", { relevance: "critical", tokenCount: 50 }),
+			observation("aaaaaaaaaaaa", { relevance: "low", content: "x".repeat(154) }),
+			observation("bbbbbbbbbbbb", { relevance: "medium", content: "x".repeat(151) }),
+			observation("cccccccccccc", { relevance: "critical", content: "x".repeat(149) }),
 		];
 
 		const metrics = observationPoolMetrics(observations, 100);
@@ -62,13 +67,13 @@ describe("V3 dropper active observation pool metrics", () => {
 
 	it("clamps target-return max drops to active observation count", () => {
 		const observations = [
-			observation("aaaaaaaaaaaa", { relevance: "low", tokenCount: 1 }),
-			observation("bbbbbbbbbbbb", { relevance: "critical", tokenCount: 1 }),
+			observation("aaaaaaaaaaaa", { relevance: "low", content: "x" }),
+			observation("bbbbbbbbbbbb", { relevance: "critical", content: "x" }),
 		];
 
 		const metrics = observationPoolMetrics(observations, 0);
 
-		expect(metrics.tokensOverTarget).toBe(2);
+		expect(metrics.tokensOverTarget).toBe(25);
 		expect(metrics.maxDropsAllowed).toBe(2);
 		expect(metrics.ready).toBe(true);
 	});
@@ -88,8 +93,8 @@ describe("V3 dropper active observation pool metrics", () => {
 	});
 
 	it("uses folded active observations so tombstones reduce readiness", () => {
-		const dropped = observation("aaaaaaaaaaaa", { relevance: "low", tokenCount: 100 });
-		const active = observation("bbbbbbbbbbbb", { relevance: "low", tokenCount: 20 });
+		const dropped = observation("aaaaaaaaaaaa", { relevance: "low" });
+		const active = observation("bbbbbbbbbbbb", { relevance: "low" });
 		const entries = [
 			textCustomMessage("raw-1", "aaaaaaaa"),
 			observationsRecordedEntry("om-obs", { observations: [dropped, active], coversUpToId: "raw-1" }),
@@ -100,7 +105,7 @@ describe("V3 dropper active observation pool metrics", () => {
 		const metrics = observationPoolMetrics(folded.activeObservations, 100);
 
 		expect(folded.activeObservations.map((obs) => obs.id)).toEqual(["bbbbbbbbbbbb"]);
-		expect(metrics.observationTokens).toBe(20);
+		expect(metrics.observationTokens).toBe(18);
 		expect(metrics.overTarget).toBe(false);
 		expect(metrics.ready).toBe(false);
 	});

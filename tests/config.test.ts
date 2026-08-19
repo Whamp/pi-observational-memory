@@ -64,6 +64,7 @@ describe("V3 config", () => {
 				agentMaxTurns: 5,
 				compactionTrigger: "native",
 				model: { provider: "anthropic", id: "global", thinking: "medium" },
+				showWorkerNotifications: true,
 				passive: false,
 				debugLog: true,
 			},
@@ -72,6 +73,7 @@ describe("V3 config", () => {
 			"observational-memory": {
 				observeAfterTokens: 100,
 				model: { provider: "openai", id: "project", thinking: "low" },
+				showWorkerNotifications: false,
 			},
 		});
 
@@ -84,6 +86,7 @@ describe("V3 config", () => {
 			agentMaxTurns: 5,
 			compactionTrigger: "native",
 			model: { provider: "openai", id: "project", thinking: "low" },
+			showWorkerNotifications: false,
 			passive: true,
 			debugLog: true,
 		});
@@ -122,6 +125,18 @@ describe("V3 config", () => {
 		expect(loadConfig(cwd, {})).toMatchObject({ showWorkerNotifications: false });
 	});
 
+	it("accepts max as a valid model thinking level", () => {
+		writeJson(join(cwd, ".pi", "settings.json"), {
+			"observational-memory": {
+				model: { provider: "anthropic", id: "claude", thinking: "max" },
+			},
+		});
+
+		expect(loadConfig(cwd, {})).toMatchObject({
+			model: { provider: "anthropic", id: "claude", thinking: "max" },
+		});
+	});
+
 	it("ignores invalid V3 values", () => {
 		writeJson(join(cwd, ".pi", "settings.json"), {
 			"observational-memory": {
@@ -133,6 +148,7 @@ describe("V3 config", () => {
 				agentMaxTurns: null,
 				compactionTrigger: "manual",
 				model: { provider: "anthropic", id: "", thinking: "huge" },
+				showWorkerNotifications: "no",
 				passive: "yes",
 				debugLog: "true",
 			},

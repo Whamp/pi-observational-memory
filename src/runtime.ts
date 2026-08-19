@@ -49,6 +49,12 @@ export class Runtime {
 	lastObserverError: string | undefined;
 	lastReflectorError: string | undefined;
 	lastDropperError: string | undefined;
+	/** Deliberate-empty backoff (#23): skip observer re-fires over the same span until enough new tokens arrive. */
+	observerEmptyBackoff: {
+		sessionIdentity: string | undefined;
+		coverageId: string | undefined;
+		tokensAtEmpty: number;
+	} | undefined;
 
 	ensureConfig(cwd: string): void {
 		if (this.configLoaded) return;

@@ -227,7 +227,7 @@ describe("V3 compaction hook", () => {
 		expect(compaction.details.reflections.map((ref) => ref.id)).toEqual(["eeeeeeeeeeee", "ffffffffffff"]);
 	});
 
-	it("ignores old V2 memory entries and details", async () => {
+	it("delegates to native compaction when only old V2 memory exists", async () => {
 		const entries = [
 			textCustomMessage("raw-1", "aaaa"),
 			oldV2ObservationEntry("v2-obs"),

@@ -108,11 +108,12 @@ describe("V3 dropper agent", () => {
 
 		await runDropper({ ...baseArgs, agentLoop: loop });
 
-		expect(userText).toContain("fullness against target: ~150%");
-		expect(userText).toContain("over target by ~10 tokens");
+		// Pool metrics count full rendered lines: 19 + 18 + 19 = 56 tokens against a 20-token target.
+		expect(userText).toContain("fullness against target: ~280%");
+		expect(userText).toContain("over target by ~36 tokens");
 		expect(userText).toContain("[coverage: partial]");
 		expect(userText).toContain("[coverage: none]");
-		expect(userText).toContain("Maximum drops allowed this run: 1 observation");
+		expect(userText).toContain("Maximum drops allowed this run: 2 observations");
 		expect(userText).toContain("sized to move the active pool toward the target");
 		expect(userText).toContain("hard upper bound, not a target");
 		expect(userText).toContain("Drop fewer or none");
@@ -180,7 +181,8 @@ describe("V3 dropper agent", () => {
 			await context.tools[0].execute("tool-1", { ids: ["aaaaaaaaaaaa", "missing", "bbbbbbbbbbbb"] });
 		});
 
-		await expect(runDropper({ ...baseArgs, agentLoop: loop })).resolves.toEqual(["aaaaaaaaaaaa"]);
+		// Rendered-line pool is 56 tokens; a 40-token target caps the run at 1 drop.
+		await expect(runDropper({ ...baseArgs, targetTokens: 40, agentLoop: loop })).resolves.toEqual(["aaaaaaaaaaaa"]);
 	});
 
 	it("returns critical proposed ids when they are the selected valid candidates", async () => {
@@ -205,7 +207,8 @@ describe("V3 dropper agent", () => {
 			await context.tools[0].execute("tool-2", { ids: ["bbbbbbbbbbbb", "aaaaaaaaaaaa"] });
 		});
 
-		await expect(runDropper({ ...baseArgs, agentLoop: loop })).resolves.toEqual(["aaaaaaaaaaaa"]);
+		// Rendered-line pool is 56 tokens; a 40-token target caps the run at 1 drop.
+		await expect(runDropper({ ...baseArgs, targetTokens: 40, agentLoop: loop })).resolves.toEqual(["aaaaaaaaaaaa"]);
 	});
 
 	it("returns undefined when no tool call drops observations", async () => {
@@ -221,8 +224,9 @@ describe("V3 dropper agent", () => {
 
 		await expect(runDropper({
 			...baseArgs,
-			observations: [observation("aaaaaaaaaaaa", { relevance: "low", tokenCount: 10 })],
-			targetTokens: 10,
+			// The rendered line for this observation is 18 tokens; an 18-token target is exactly at target.
+			observations: [observation("aaaaaaaaaaaa", { relevance: "low" })],
+			targetTokens: 18,
 			agentLoop: loop,
 		})).resolves.toBeUndefined();
 		expect(called).toBe(false);

@@ -1,4 +1,5 @@
 import type { Message, TextContent, ToolResultMessage } from "@earendil-works/pi-ai";
+import { estimateStringTokens } from "./tokens.js";
 
 function pad(n: number): string {
 	return n.toString().padStart(2, "0");
@@ -166,23 +167,78 @@ export function serializeBranchEntries(entries: RenderableEntry[]): string {
 export type SourceAddressedSerialization = {
 	text: string;
 	sourceEntryIds: string[];
+	estimatedTokens: number;
+	truncatedSourceEntryIds: string[];
 };
+
+export type SourceAddressedSerializationOptions = {
+	/** Maximum estimated tokens in the final source-addressed text. */
+	maxTokens?: number;
+};
+
+const SOURCE_OMISSION_MARKER =
+	"\n\n[… middle omitted: source exceeds observer input budget; original source remains in the session ledger …]\n\n";
+
+function truncateSourceBlockToTokenBudget(label: string, rendered: string, maxTokens: number): string | undefined {
+	const required = `${label}\n${SOURCE_OMISSION_MARKER}`;
+	if (estimateStringTokens(required) > maxTokens) return undefined;
+	const full = `${label}\n${rendered}`;
+	if (estimateStringTokens(full) <= maxTokens) return full;
+	const maxChars = Math.max(1, maxTokens * 4);
+	const fixed = `${label}\n${SOURCE_OMISSION_MARKER}`;
+	const retainedChars = maxChars - fixed.length;
+	const headChars = Math.ceil(retainedChars / 2);
+	const tailChars = retainedChars - headChars;
+	return `${label}\n${rendered.slice(0, headChars)}${SOURCE_OMISSION_MARKER}${tailChars > 0 ? rendered.slice(-tailChars) : ""}`;
+}
 
 function isSourceRenderableEntry(entry: RenderableEntry): boolean {
 	return entry.type === "message" || entry.type === "custom_message" || entry.type === "branch_summary";
 }
 
-export function serializeSourceAddressedBranchEntries(entries: RenderableEntry[]): SourceAddressedSerialization {
+/**
+ * Serialize complete source entries up to the token budget. If the first entry
+ * alone exceeds the budget, include a clearly marked head/tail excerpt so one
+ * pathological tool result cannot permanently block observation coverage.
+ * The original ledger entry is never modified and remains recallable by id.
+ */
+export function serializeSourceAddressedBranchEntries(
+	entries: RenderableEntry[],
+	options: SourceAddressedSerializationOptions = {},
+): SourceAddressedSerialization {
 	const blocks: string[] = [];
 	const sourceEntryIds: string[] = [];
+	const truncatedSourceEntryIds: string[] = [];
+	let estimatedTokens = 0;
+
 	for (const entry of entries) {
 		if (!entry.id || !isSourceRenderableEntry(entry)) continue;
 		const rendered = serializeBranchEntries([entry]);
 		if (!rendered.trim()) continue;
+		const label = `[Source entry id: ${entry.id}]`;
+		const block = `${label}\n${rendered}`;
+		const separator = blocks.length > 0 ? "\n\n" : "";
+		const blockTokens = estimateStringTokens(`${separator}${block}`);
+		const maxTokens = options.maxTokens;
+
+		if (maxTokens !== undefined && estimatedTokens + blockTokens > maxTokens) {
+			if (blocks.length > 0) break;
+			const excerpt = truncateSourceBlockToTokenBudget(label, rendered, maxTokens);
+			if (!excerpt) break;
+			blocks.push(excerpt);
+			sourceEntryIds.push(entry.id);
+			truncatedSourceEntryIds.push(entry.id);
+			estimatedTokens = estimateStringTokens(excerpt);
+			break;
+		}
+
+		blocks.push(block);
 		sourceEntryIds.push(entry.id);
-		blocks.push(`[Source entry id: ${entry.id}]\n${rendered}`);
+		estimatedTokens += blockTokens;
 	}
-	return { text: blocks.join("\n\n"), sourceEntryIds };
+
+	const text = blocks.join("\n\n");
+	return { text, sourceEntryIds, estimatedTokens: estimateStringTokens(text), truncatedSourceEntryIds };
 }
 
 function renderRecallMessage(entry: RenderableEntry): string | null {
