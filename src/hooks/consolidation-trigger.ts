@@ -33,7 +33,7 @@ import {
 
 type StageResolution = {
 	model: unknown;
-	apiKey: string;
+	apiKey?: string;
 	headers?: Record<string, string>;
 	thinking: ModelThinkingLevel;
 };

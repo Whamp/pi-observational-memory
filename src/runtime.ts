@@ -1,8 +1,25 @@
 import { type Config, type ConfiguredModel, DEFAULTS, loadConfig } from "./config.js";
 
 export type ResolveResult =
-	| { ok: true; model: unknown; apiKey: string; headers?: Record<string, string> }
+	| { ok: true; model: unknown; apiKey?: string; headers?: Record<string, string> }
 	| { ok: false; reason: string };
+
+/**
+ * Mirrors pi's own request-auth acceptance rule (`AgentSession._getRequiredRequestAuth`):
+ * resolved auth is usable when it carries an apiKey OR at least one header value.
+ * OAuth providers (kimi-coding, xai, openai-codex, anthropic OAuth, …) authenticate via
+ * `toAuth()` returning `{ headers: { Authorization: "Bearer …" } }` with no apiKey, and
+ * pi-ai providers accept a caller-supplied Authorization header in place of an apiKey.
+ */
+function hasUsableAuth(auth: { apiKey?: unknown; headers?: unknown }): boolean {
+	if (typeof auth.apiKey === "string" && auth.apiKey.length > 0) return true;
+	if (auth.headers && typeof auth.headers === "object") {
+		return Object.values(auth.headers as Record<string, unknown>).some(
+			(value) => typeof value === "string" && value.length > 0,
+		);
+	}
+	return false;
+}
 
 type NotifyLevel = "warning" | "info" | "error";
 type Notify = (message: string, type?: NotifyLevel) => void;
@@ -55,11 +72,15 @@ export class Runtime {
 		}
 		if (!model) return { ok: false, reason: "no model available (session has no model and no observational-memory model configured)" };
 		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-		if (!auth.ok || !auth.apiKey) {
-			const provider = (model as { provider?: string }).provider ?? "unknown";
-			return { ok: false, reason: `no API key for provider "${provider}"` };
+		const provider = (model as { provider?: string }).provider ?? "unknown";
+		if (!auth.ok || !hasUsableAuth(auth)) {
+			const isOAuth = ctx.modelRegistry.isUsingOAuth?.(model) === true;
+			const reason = isOAuth
+				? `authentication failed for provider "${provider}" — OAuth credentials may have expired; run '/login ${provider}' to re-authenticate`
+				: `no API key or auth headers for provider "${provider}"`;
+			return { ok: false, reason };
 		}
-		return { ok: true, model, apiKey: auth.apiKey as string, headers: auth.headers as Record<string, string> | undefined };
+		return { ok: true, model, apiKey: auth.apiKey as string | undefined, headers: auth.headers as Record<string, string> | undefined };
 	}
 
 	launchConsolidationTask(ctx: LaunchCtx, work: () => Promise<void>): Promise<void> {

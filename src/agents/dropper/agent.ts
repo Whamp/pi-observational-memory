@@ -38,7 +38,7 @@ export type { CoverageSummaryByRelevance, CoverageTransitionSummaryByRelevance, 
 
 interface RunDropperArgs {
 	model: Model<any>;
-	apiKey: string;
+	apiKey?: string;
 	headers?: Record<string, string>;
 	reflections: Reflection[];
 	observations: Observation[];

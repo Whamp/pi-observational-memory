@@ -12,7 +12,7 @@ import { estimateStringTokens } from "../../tokens.js";
 
 interface RunObserverArgs {
 	model: Model<any>;
-	apiKey: string;
+	apiKey?: string;
 	headers?: Record<string, string>;
 	priorReflections: string[];
 	priorObservations: string[];

@@ -2,10 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 
 import { Runtime } from "../src/runtime.js";
 
-function modelRegistry(args: { found?: unknown; auth?: unknown } = {}) {
+function modelRegistry(args: { found?: unknown; auth?: unknown; usesOAuth?: boolean } = {}) {
 	return {
 		find: vi.fn(() => args.found),
 		getApiKeyAndHeaders: vi.fn(async () => args.auth ?? { ok: true, apiKey: "key", headers: { test: "yes" } }),
+		isUsingOAuth: vi.fn(() => args.usesOAuth === true),
 	};
 }
 
@@ -48,7 +49,26 @@ describe("Runtime V3 behavior", () => {
 		const registry = modelRegistry({ auth: { ok: false } });
 		await expect(runtime.resolveModel({ model: { provider: "anthropic" }, modelRegistry: registry, hasUI: false })).resolves.toEqual({
 			ok: false,
-			reason: 'no API key for provider "anthropic"',
+			reason: 'no API key or auth headers for provider "anthropic"',
+		});
+	});
+
+	it("accepts headers-only OAuth auth (no apiKey)", async () => {
+		const runtime = new Runtime();
+		const registry = modelRegistry({ auth: { ok: true, headers: { Authorization: "Bearer token" } } });
+
+		const result = await runtime.resolveModel({ model: { provider: "xai" }, modelRegistry: registry, hasUI: false });
+
+		expect(result).toEqual({ ok: true, model: { provider: "xai" }, apiKey: undefined, headers: { Authorization: "Bearer token" } });
+	});
+
+	it("suggests /login when an OAuth provider fails auth", async () => {
+		const runtime = new Runtime();
+		const registry = modelRegistry({ auth: { ok: false }, usesOAuth: true });
+
+		await expect(runtime.resolveModel({ model: { provider: "kimi-coding" }, modelRegistry: registry, hasUI: false })).resolves.toEqual({
+			ok: false,
+			reason: 'authentication failed for provider "kimi-coding" — OAuth credentials may have expired; run \'/login kimi-coding\' to re-authenticate',
 		});
 	});
 
