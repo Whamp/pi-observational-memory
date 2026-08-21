@@ -1,8 +1,12 @@
+import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
+import type { Api, Model } from "@earendil-works/pi-ai";
 import { type Config, type ConfiguredModel, DEFAULTS, loadConfig } from "./config.js";
 
 export type ResolveResult =
-	| { ok: true; model: unknown; apiKey?: string; headers?: Record<string, string> }
+	| { ok: true; model: Model<Api>; apiKey?: string; headers?: Record<string, string> }
 	| { ok: false; reason: string };
+
+type ResolvedRequestAuth = Awaited<ReturnType<ModelRegistry["getApiKeyAndHeaders"]>>;
 
 /**
  * Mirrors pi's own request-auth acceptance rule (`AgentSession._getRequiredRequestAuth`):
@@ -11,14 +15,9 @@ export type ResolveResult =
  * `toAuth()` returning `{ headers: { Authorization: "Bearer …" } }` with no apiKey, and
  * pi-ai providers accept a caller-supplied Authorization header in place of an apiKey.
  */
-function hasUsableAuth(auth: { apiKey?: unknown; headers?: unknown }): boolean {
-	if (typeof auth.apiKey === "string" && auth.apiKey.length > 0) return true;
-	if (auth.headers && typeof auth.headers === "object") {
-		return Object.values(auth.headers as Record<string, unknown>).some(
-			(value) => typeof value === "string" && value.length > 0,
-		);
-	}
-	return false;
+function hasUsableAuth(auth: Extract<ResolvedRequestAuth, { ok: true }>): boolean {
+	if (auth.apiKey && auth.apiKey.length > 0) return true;
+	return Object.values(auth.headers ?? {}).some((value) => value.length > 0);
 }
 
 type NotifyLevel = "warning" | "info" | "error";
@@ -26,8 +25,8 @@ type Notify = (message: string, type?: NotifyLevel) => void;
 export type ConsolidationPhase = "observer" | "reflector" | "dropper";
 
 export interface ResolveCtx {
-	model: unknown;
-	modelRegistry: any;
+	model: Model<Api> | undefined;
+	modelRegistry: Pick<ModelRegistry, "find" | "getApiKeyAndHeaders" | "isUsingOAuth">;
 	hasUI: boolean;
 	ui?: { notify: Notify };
 }
@@ -49,12 +48,6 @@ export class Runtime {
 	lastObserverError: string | undefined;
 	lastReflectorError: string | undefined;
 	lastDropperError: string | undefined;
-	/** Deliberate-empty backoff (#23): skip observer re-fires over the same span until enough new tokens arrive. */
-	observerEmptyBackoff: {
-		sessionIdentity: string | undefined;
-		coverageId: string | undefined;
-		tokensAtEmpty: number;
-	} | undefined;
 
 	ensureConfig(cwd: string): void {
 		if (this.configLoaded) return;
@@ -78,15 +71,15 @@ export class Runtime {
 		}
 		if (!model) return { ok: false, reason: "no model available (session has no model and no observational-memory model configured)" };
 		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-		const provider = (model as { provider?: string }).provider ?? "unknown";
+		const provider = model.provider;
 		if (!auth.ok || !hasUsableAuth(auth)) {
-			const isOAuth = ctx.modelRegistry.isUsingOAuth?.(model) === true;
+			const isOAuth = ctx.modelRegistry.isUsingOAuth(model);
 			const reason = isOAuth
 				? `authentication failed for provider "${provider}" — OAuth credentials may have expired; run '/login ${provider}' to re-authenticate`
 				: `no API key or auth headers for provider "${provider}"`;
 			return { ok: false, reason };
 		}
-		return { ok: true, model, apiKey: auth.apiKey as string | undefined, headers: auth.headers as Record<string, string> | undefined };
+		return { ok: true, model, apiKey: auth.apiKey, headers: auth.headers };
 	}
 
 	launchConsolidationTask(ctx: LaunchCtx, work: () => Promise<void>): Promise<void> {

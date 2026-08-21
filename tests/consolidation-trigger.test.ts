@@ -1,19 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-const mockAgents = vi.hoisted(() => ({
+import { registerConsolidationTrigger } from "../src/hooks/consolidation-trigger.js";
+import type { Runtime } from "../src/runtime.js";
+
+const mockAgents = {
 	runObserver: vi.fn(),
 	runReflector: vi.fn(),
 	runDropper: vi.fn(),
-}));
-
-vi.mock("../src/agents/observer/agent.js", async (importOriginal) => ({
-	...(await importOriginal<typeof import("../src/agents/observer/agent.js")>()),
-	runObserver: mockAgents.runObserver,
-}));
-vi.mock("../src/agents/reflector/agent.js", () => ({ runReflector: mockAgents.runReflector }));
-vi.mock("../src/agents/dropper/agent.js", () => ({ runDropper: mockAgents.runDropper }));
-
-import { registerConsolidationTrigger } from "../src/hooks/consolidation-trigger.js";
+};
 import type { StageModelConfig } from "../src/config.js";
 import {
 	OM_OBSERVER_COMPLETED,
@@ -108,7 +103,8 @@ function setup(args: {
 			return message;
 		}),
 	};
-	registerConsolidationTrigger(pi as any, runtime as any);
+	// SAFETY: The trigger uses only the API and runtime members supplied by this harness.
+	registerConsolidationTrigger(pi as ExtensionAPI, runtime as Runtime, mockAgents);
 	if (!handlers.agent_start) throw new Error("agent_start consolidation handler not registered");
 	if (!handlers.turn_end) throw new Error("turn_end consolidation handler not registered");
 	const ctx = {
@@ -212,7 +208,8 @@ describe("V3 consolidation trigger", () => {
 				return message;
 			}),
 		};
-		registerConsolidationTrigger(pi as any, runtime as any);
+		// SAFETY: The trigger uses only the API and runtime members supplied by this harness.
+		registerConsolidationTrigger(pi as ExtensionAPI, runtime as Runtime, mockAgents);
 
 		const ctx = {
 			mode: "print",
@@ -997,7 +994,12 @@ describe("observer chunk cap", () => {
 		];
 		const { fire, runLaunchedWork, pi, runtime } = setup({ entries, reflectAfterTokens: 999 });
 		// contextWindow 1,280 -> cap = floor(1,280 * 0.2) = 256, so only raw-1 fits.
-		runtime.resolveModel.mockResolvedValue({ ok: true, model: { reasoning: true, contextWindow: 1_280 }, apiKey: "key", headers: { h: "v" } } as any);
+		runtime.resolveModel.mockImplementation(async () => ({
+			ok: true,
+			model: { reasoning: true, contextWindow: 1_280 },
+			apiKey: "key",
+			headers: { h: "v" },
+		}));
 
 		fire();
 		await runLaunchedWork();

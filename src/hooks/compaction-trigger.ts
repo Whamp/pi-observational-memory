@@ -11,7 +11,6 @@ import { resolveCompactAfterTokens, resolveEffectiveCompactionTrigger } from "..
 import {
 	findLastCompactionIndex,
 	rawTokensSinceLastCompaction,
-	type Entry,
 } from "../session-ledger/index.js";
 import type { Runtime } from "../runtime.js";
 
@@ -210,8 +209,7 @@ export function registerCompactionTrigger(pi: ExtensionAPI, runtime: Runtime): v
 		if (runtime.compactInFlight) return;
 		if (resolveEffectiveCompactionTrigger(runtime.config, ctx.mode) !== "agentEnd") return;
 
-		const entries = ctx.sessionManager?.getBranch?.() as Entry[] | undefined;
-		if (!entries) return;
+		const entries = ctx.sessionManager.getBranch();
 		const progress = rawTokensSinceLastCompaction(entries);
 		const contextWindow = typeof ctx.model?.contextWindow === "number" ? ctx.model.contextWindow : undefined;
 		const threshold = resolveCompactAfterTokens(runtime.config, contextWindow);
@@ -238,11 +236,7 @@ export function registerCompactionTrigger(pi: ExtensionAPI, runtime: Runtime): v
 					);
 					return;
 				}
-				const currentEntries = ctx.sessionManager?.getBranch?.() as Entry[] | undefined;
-				if (!currentEntries) {
-					runtime.compactInFlight = false;
-					return;
-				}
+				const currentEntries = ctx.sessionManager.getBranch();
 				const currentProgress = rawTokensSinceLastCompaction(currentEntries);
 				if (currentProgress < threshold) {
 					runtime.compactInFlight = false;

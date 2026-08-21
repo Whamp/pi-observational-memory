@@ -1,8 +1,28 @@
 import { describe, expect, it, vi } from "vitest";
+import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
+import type { Api, Model } from "@earendil-works/pi-ai";
 
 import { Runtime } from "../src/runtime.js";
 
-function modelRegistry(args: { found?: unknown; auth?: unknown; usesOAuth?: boolean } = {}) {
+type ResolvedRequestAuth = Awaited<ReturnType<ModelRegistry["getApiKeyAndHeaders"]>>;
+
+function testModel(overrides: Partial<Model<Api>> = {}): Model<Api> {
+	return {
+		id: "test-model",
+		name: "Test model",
+		api: "anthropic-messages",
+		provider: "anthropic",
+		baseUrl: "http://127.0.0.1",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: 8_000,
+		...overrides,
+	};
+}
+
+function modelRegistry(args: { found?: Model<Api>; auth?: ResolvedRequestAuth; usesOAuth?: boolean } = {}) {
 	return {
 		find: vi.fn(() => args.found),
 		getApiKeyAndHeaders: vi.fn(async () => args.auth ?? { ok: true, apiKey: "key", headers: { test: "yes" } }),
@@ -13,11 +33,11 @@ function modelRegistry(args: { found?: unknown; auth?: unknown; usesOAuth?: bool
 describe("Runtime V3 behavior", () => {
 	it("uses configured model when present", async () => {
 		const runtime = new Runtime();
-		const configured = { provider: "anthropic", id: "configured" };
+		const configured = testModel({ provider: "anthropic", id: "configured" });
 		const registry = modelRegistry({ found: configured });
 		runtime.config = { ...runtime.config, model: { provider: "anthropic", id: "configured" } };
 
-		const result = await runtime.resolveModel({ model: { provider: "openai" }, modelRegistry: registry, hasUI: false });
+		const result = await runtime.resolveModel({ model: testModel({ provider: "openai" }), modelRegistry: registry, hasUI: false });
 
 		expect(registry.find).toHaveBeenCalledWith("anthropic", "configured");
 		expect(result).toEqual({ ok: true, model: configured, apiKey: "key", headers: { test: "yes" } });
@@ -26,7 +46,7 @@ describe("Runtime V3 behavior", () => {
 	it("falls back to session model and notifies when configured model is missing", async () => {
 		const runtime = new Runtime();
 		const notify = vi.fn();
-		const sessionModel = { provider: "openai" };
+		const sessionModel = testModel({ provider: "openai" });
 		const registry = modelRegistry();
 		runtime.config = { ...runtime.config, model: { provider: "anthropic", id: "missing" } };
 
@@ -46,8 +66,8 @@ describe("Runtime V3 behavior", () => {
 			reason: "no model available (session has no model and no observational-memory model configured)",
 		});
 
-		const registry = modelRegistry({ auth: { ok: false } });
-		await expect(runtime.resolveModel({ model: { provider: "anthropic" }, modelRegistry: registry, hasUI: false })).resolves.toEqual({
+		const registry = modelRegistry({ auth: { ok: false, error: "missing auth" } });
+		await expect(runtime.resolveModel({ model: testModel({ provider: "anthropic" }), modelRegistry: registry, hasUI: false })).resolves.toEqual({
 			ok: false,
 			reason: 'no API key or auth headers for provider "anthropic"',
 		});
@@ -55,7 +75,7 @@ describe("Runtime V3 behavior", () => {
 
 	it("accepts OAuth-shaped auth (headers only, no apiKey)", async () => {
 		const runtime = new Runtime();
-		const model = { provider: "kimi-coding", id: "kimi-for-coding" };
+		const model = testModel({ provider: "kimi-coding", id: "kimi-for-coding" });
 		const registry = modelRegistry({
 			auth: { ok: true, apiKey: undefined, headers: { Authorization: "Bearer oauth-token" } },
 		});
@@ -72,7 +92,7 @@ describe("Runtime V3 behavior", () => {
 
 	it("accepts apiKey auth unchanged", async () => {
 		const runtime = new Runtime();
-		const model = { provider: "anthropic", id: "claude" };
+		const model = testModel({ provider: "anthropic", id: "claude" });
 		const registry = modelRegistry({ auth: { ok: true, apiKey: "sk-ant-key" } });
 
 		const result = await runtime.resolveModel({ model, modelRegistry: registry, hasUI: false });
@@ -82,7 +102,7 @@ describe("Runtime V3 behavior", () => {
 
 	it("rejects auth that carries neither apiKey nor usable headers", async () => {
 		const runtime = new Runtime();
-		const model = { provider: "xai" };
+		const model = testModel({ provider: "xai" });
 
 		for (const auth of [
 			{ ok: true },
@@ -100,10 +120,10 @@ describe("Runtime V3 behavior", () => {
 
 	it("points OAuth providers at /login when auth resolution fails", async () => {
 		const runtime = new Runtime();
-		const model = { provider: "openai-codex", id: "gpt-5-codex" };
+		const model = testModel({ provider: "openai-codex", id: "gpt-5-codex" });
 		const registry = {
 			...modelRegistry({ auth: { ok: false, error: "refresh failed" } }),
-			isUsingOAuth: vi.fn((candidate: { provider?: string }) => candidate?.provider === "openai-codex"),
+			isUsingOAuth: vi.fn((candidate: Model<Api>) => candidate.provider === "openai-codex"),
 		};
 
 		const result = await runtime.resolveModel({ model, modelRegistry: registry, hasUI: false });

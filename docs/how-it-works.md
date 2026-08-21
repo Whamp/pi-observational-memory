@@ -229,7 +229,7 @@ The extension supports two proactive timings. `agentEnd` preserves the legacy po
 Effective trigger policy:
 
 - `native`: never call extension `ctx.compact()` proactively.
-- `agentEnd`: use the legacy `agent_end` threshold trigger.
+- `agentEnd`: use the legacy threshold policy from `agent_settled`.
 - `betweenTurns`: use the tool-bearing `turn_end` → idle `agent_settled` trigger in every Pi mode.
 - `auto`: use `native` in `print` and `json`; use `agentEnd` in `tui`, `rpc`, and unknown interactive modes.
 
@@ -272,7 +272,7 @@ The compaction hook runs on `session_before_compact` and is the critical V3 late
 1. Guard against duplicate concurrent compaction hooks.
 2. Load config if needed.
 3. Resolve the Pruned Source Boundary: the final source entry newly removed before `firstKeptEntryId`, after the previous compaction boundary.
-4. Resolve the greatest valid source-backed Observation Coverage from leading and explicit Empty outcomes.
+4. Resolve the greatest valid source-backed Observation Coverage from Recorded and explicit Empty outcomes.
 5. Record the content-free authority decision in debug logs when enabled.
 6. If coverage reaches the boundary, build and render the deterministic projection and return `om.folded` details.
 7. Otherwise return no override and no cancellation so a later handler can summarize the source.

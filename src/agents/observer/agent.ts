@@ -4,7 +4,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { streamSimple } from "@earendil-works/pi-ai/compat";
 import type { Static } from "typebox";
 import { hashId } from "../../ids.js";
-import { logAgentStreamError } from "../stream-errors.js";
+import { agentStreamFailure, logAgentStreamError } from "../stream-errors.js";
 import { AGENT_LOOP_MAX_TOKENS, boundedMaxTokens } from "../../model-budget.js";
 import { OBSERVER_SYSTEM } from "./prompts.js";
 import { nowTimestamp, truncateRecordContent } from "../../serialize.js";
@@ -187,7 +187,7 @@ ${conversation}`;
 		tools: [recordObservations as AgentTool<any>],
 	};
 
-	const reasoning = (model as { reasoning?: unknown }).reasoning;
+	const reasoning = model.reasoning;
 	const thinkingLevel = args.thinkingLevel ?? "low";
 	const effectiveMaxTurns = args.maxTurns && args.maxTurns > 0 ? args.maxTurns : undefined;
 	let turnCount = 0;
@@ -217,10 +217,7 @@ ${conversation}`;
 		logAgentStreamError("observer", event);
 		// Watch for a terminal API/stream failure so it is not conflated with
 		// a deliberate empty result.
-		const message = (event as { message?: { role?: string; stopReason?: string; errorMessage?: string } }).message;
-		if (message?.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted")) {
-			streamError = { stopReason: message.stopReason, errorMessage: message.errorMessage };
-		}
+		streamError = agentStreamFailure(event) ?? streamError;
 	}
 	await stream.result();
 

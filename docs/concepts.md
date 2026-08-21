@@ -70,7 +70,7 @@ Dropping does not delete history. Dropped observations remain recallable from le
 
 ### Observer
 
-The observer runs asynchronously from `turn_end` when raw/source tokens after the latest observation coverage marker reach `observeAfterTokens`. After a deliberate empty result, it waits for another `observeAfterTokens` of source tokens before retrying the uncovered range.
+The observer runs asynchronously from `turn_end` when raw/source tokens after the latest observation coverage marker reach `observeAfterTokens`. A deliberate Empty outcome advances Observation Coverage, so the covered range is retired permanently and is not observed again.
 
 It receives an oldest-first chunk of raw/source entries, validates source ids, and reports a Recorded, Empty, or Failed outcome. Recorded appends a non-empty `om.observations.recorded` entry. Explicit Empty appends `om.observer.completed` without creating observations. Both advance Observation Coverage. Failed appends no coverage marker, remains visible as an error, and leaves the range eligible for another observer run. Chunking targets a fixed token budget (default 60,000 estimated tokens) but always includes at least one entry, so a single oversized entry cannot stall coverage.
 

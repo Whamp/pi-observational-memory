@@ -124,9 +124,9 @@ Default: `auto`.
 
 Modes:
 
-- `auto`: use Pi native compaction timing in `print` and `json` modes; use the legacy `agent_end` trigger in `tui`, `rpc`, and unknown interactive modes.
+- `auto`: use Pi native compaction timing in `print` and `json` modes; use the `agentEnd` policy, scheduled from `agent_settled`, in `tui`, `rpc`, and unknown interactive modes.
 - `native`: never call extension `ctx.compact()` proactively. Pi's native top-level compaction settings decide timing. V3 supplies covered summaries and delegates uncovered source.
-- `agentEnd`: preserve the previous proactive behavior exactly: after `agent_end`, if raw/source tokens since the last compaction reach `compactAfterTokens` and Pi is idle, call `ctx.compact()`.
+- `agentEnd`: preserve the previous proactive threshold policy, now scheduled from `agent_settled`: if raw/source tokens since the last compaction reach `compactAfterTokens` and Pi is idle, call `ctx.compact()`.
 - `betweenTurns`: opt in to proactive compaction after a due tool-bearing turn. Abort at the boundary, compact after settlement, then send one hidden same-session continuation signal only after successful compaction and headroom proof.
 
 For eval harnesses and `pi -p`, use `betweenTurns` when one submitted prompt must compact and keep working automatically. Prefer native timing when Pi should own threshold and overflow continuation:

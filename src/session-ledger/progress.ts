@@ -152,6 +152,7 @@ type UsageLike = {
 
 export function contextTokensFromUsage(usage: unknown): number | undefined {
 	if (!usage || typeof usage !== "object") return undefined;
+	// SAFETY: Every property is optional and validated before arithmetic.
 	const u = usage as UsageLike;
 	const total = typeof u.totalTokens === "number" && Number.isFinite(u.totalTokens) && u.totalTokens > 0 ? u.totalTokens : undefined;
 	if (total !== undefined) return total;
@@ -165,6 +166,7 @@ export function contextTokensFromUsage(usage: unknown): number | undefined {
 
 function validAssistantContextTokens(entry: Entry): number | undefined {
 	if (entry.type !== "message" || !entry.message || typeof entry.message !== "object") return undefined;
+	// SAFETY: Session message fields are optional here and checked before use.
 	const msg = entry.message as { role?: string; stopReason?: string; usage?: unknown };
 	if (msg.role !== "assistant" || msg.stopReason === "aborted" || msg.stopReason === "error") return undefined;
 	return contextTokensFromUsage(msg.usage);

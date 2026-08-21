@@ -6,7 +6,7 @@ import { runObserver } from "../agents/observer/agent.js";
 import { runReflector } from "../agents/reflector/agent.js";
 import { resolveObserverChunkMaxTokens, resolveStageModel, type StageName } from "../config.js";
 import { debugLog, withDebugLogContext } from "../debug-log.js";
-import { type Runtime } from "../runtime.js";
+import { type ResolveCtx, type Runtime } from "../runtime.js";
 import { serializeSourceAddressedBranchEntries } from "../serialize.js";
 import {
 	OM_OBSERVER_COMPLETED,
@@ -34,7 +34,7 @@ import {
 } from "../session-ledger/index.js";
 
 type StageResolution = {
-	model: unknown;
+	model: MemoryWorkerModel;
 	apiKey?: string;
 	headers?: Record<string, string>;
 	thinking: ModelThinkingLevel;
@@ -45,8 +45,8 @@ type ConsolidationCtx = {
 	cwd: string;
 	hasUI: boolean;
 	ui?: { notify: (message: string, type?: "warning" | "info" | "error") => void };
-	model: unknown;
-	modelRegistry: any;
+	model: ResolveCtx["model"];
+	modelRegistry: ResolveCtx["modelRegistry"];
 	getContextUsage?: () => { tokens?: number | null; contextWindow?: number } | undefined;
 	sessionManager: {
 		getBranch: () => unknown;
@@ -164,9 +164,14 @@ async function waitForPendingConsolidation(runtime: Runtime): Promise<void> {
 	await pending.catch(() => undefined);
 }
 
-export function registerConsolidationTrigger(pi: ExtensionAPI, runtime: Runtime): void {
+/** Register background consolidation lifecycle handlers. */
+export function registerConsolidationTrigger(
+	pi: ExtensionAPI,
+	runtime: Runtime,
+	workers: ConsolidationWorkers = DEFAULT_CONSOLIDATION_WORKERS,
+): void {
 	const launch = (_event: unknown, ctx: ConsolidationCtx) => {
-		maybeLaunchConsolidation(pi, runtime, ctx);
+		maybeLaunchConsolidation(pi, runtime, ctx, workers);
 	};
 	pi.on("agent_start", launch);
 	pi.on("turn_end", launch);
@@ -189,7 +194,27 @@ function debugSessionMetadata(ctx: ConsolidationCtx): { sessionId?: string; sess
 	}
 }
 
-function maybeLaunchConsolidation(pi: ExtensionAPI, runtime: Runtime, ctx: ConsolidationCtx): void {
+type MemoryWorkerModel = Parameters<typeof runObserver>[0]["model"];
+
+/** Injected observer, reflector, and dropper implementations. */
+export interface ConsolidationWorkers {
+	runObserver: typeof runObserver;
+	runReflector: typeof runReflector;
+	runDropper: typeof runDropper;
+}
+
+const DEFAULT_CONSOLIDATION_WORKERS: ConsolidationWorkers = {
+	runObserver,
+	runReflector,
+	runDropper,
+};
+
+function maybeLaunchConsolidation(
+	pi: ExtensionAPI,
+	runtime: Runtime,
+	ctx: ConsolidationCtx,
+	workers: ConsolidationWorkers,
+): void {
 	runtime.ensureConfig(ctx.cwd);
 	if (runtime.config.passive === true) return;
 	if (runtime.consolidationInFlight) return;
@@ -215,20 +240,22 @@ function maybeLaunchConsolidation(pi: ExtensionAPI, runtime: Runtime, ctx: Conso
 		...sessionMetadata,
 		runId,
 	}, async () => {
-		await runConsolidationPipeline(pi, runtime, consolidationCtx);
+		await runConsolidationPipeline(pi, runtime, consolidationCtx, workers);
 	}));
 }
 
+/** Run one observer, reflector, and dropper consolidation pass. */
 export async function runConsolidationPipeline(
 	pi: ExtensionAPI,
 	runtime: Runtime,
 	ctx: ConsolidationCtx,
+	workers: ConsolidationWorkers = DEFAULT_CONSOLIDATION_WORKERS,
 ): Promise<void> {
 	const resolveModel = makeModelResolver(runtime, ctx);
 
 	runtime.consolidationPhase = "observer";
 	try {
-		const observerOutcome = await runObserverStage(pi, runtime, ctx, resolveModel);
+		const observerOutcome = await runObserverStage(pi, runtime, ctx, resolveModel, workers);
 		if (observerOutcome === "abort") return;
 	} catch (error) {
 		debugLog("observer.error", { errorMessage: runtime.recordConsolidationStageError(ctx, "observer", error) });
@@ -238,7 +265,7 @@ export async function runConsolidationPipeline(
 	runtime.consolidationPhase = "reflector";
 	let reflectorResult: ReflectorStageResult;
 	try {
-		reflectorResult = await runReflectorStage(pi, runtime, ctx, resolveModel);
+		reflectorResult = await runReflectorStage(pi, runtime, ctx, resolveModel, workers);
 		if (reflectorResult.outcome === "abort") return;
 	} catch (error) {
 		debugLog("reflector.error", { errorMessage: runtime.recordConsolidationStageError(ctx, "reflector", error) });
@@ -247,7 +274,15 @@ export async function runConsolidationPipeline(
 
 	runtime.consolidationPhase = "dropper";
 	try {
-		await runDropperStage(pi, runtime, ctx, resolveModel, reflectorResult.sameRunReflections, reflectorResult.effectiveReflectionCoverageId);
+		await runDropperStage(
+			pi,
+			runtime,
+			ctx,
+			resolveModel,
+			reflectorResult.sameRunReflections,
+			reflectorResult.effectiveReflectionCoverageId,
+			workers,
+		);
 	} catch (error) {
 		debugLog("dropper.error", { errorMessage: runtime.recordConsolidationStageError(ctx, "dropper", error) });
 	}
@@ -258,6 +293,7 @@ async function runObserverStage(
 	runtime: Runtime,
 	ctx: ConsolidationCtx,
 	resolveModel: (stage: "observer") => Promise<StageResolution | undefined>,
+	workers: ConsolidationWorkers,
 ): Promise<StageOutcome> {
 	const entries = ctx.sessionManager.getBranch() as Entry[];
 	const currentTokens = realContextTokens(ctx);
@@ -282,7 +318,7 @@ async function runObserverStage(
 	// labels and rendered message content. Complete entries are kept intact.
 	// Only a first entry that cannot fit by itself is represented by a clearly
 	// marked head/tail excerpt; the original ledger entry remains untouched.
-	const contextWindow = (resolved.model as { contextWindow?: number }).contextWindow;
+	const contextWindow = resolved.model.contextWindow;
 	const maxChunkTokens = resolveObserverChunkMaxTokens(runtime.config, contextWindow);
 	const {
 		text: chunk,
@@ -323,8 +359,8 @@ async function runObserverStage(
 		priorObservations: priorObservations.length,
 	});
 
-	const result = await runObserver({
-		model: resolved.model as any,
+	const result = await workers.runObserver({
+		model: resolved.model,
 		apiKey: resolved.apiKey,
 		headers: resolved.headers,
 		priorReflections,
@@ -390,6 +426,7 @@ async function runReflectorStage(
 	runtime: Runtime,
 	ctx: ConsolidationCtx,
 	resolveModel: (stage: "reflector") => Promise<StageResolution | undefined>,
+	workers: ConsolidationWorkers,
 ): Promise<ReflectorStageResult> {
 	const entries = ctx.sessionManager.getBranch() as Entry[];
 	const currentTokens = realContextTokens(ctx);
@@ -408,8 +445,8 @@ async function runReflectorStage(
 	if (!resolved) return { outcome: "abort", sameRunReflections: [] };
 
 	const folded = foldLedger(entries);
-	const reflections = await runReflector({
-		model: resolved.model as any,
+	const reflections = await workers.runReflector({
+		model: resolved.model,
 		apiKey: resolved.apiKey,
 		headers: resolved.headers,
 		reflections: folded.reflections,
@@ -436,6 +473,7 @@ async function runDropperStage(
 	resolveModel: (stage: "dropper") => Promise<StageResolution | undefined>,
 	sameRunReflections: Reflection[],
 	sameRunReflectionCoverageId: string | undefined,
+	workers: ConsolidationWorkers,
 ): Promise<StageOutcome> {
 	if (!sameRunReflectionCoverageId || sameRunReflections.length === 0) {
 		debugLog("dropper.waiting_for_reflection", { sameRunReflections: sameRunReflections.length });
@@ -480,8 +518,8 @@ async function runDropperStage(
 	if (!resolved) return "abort";
 
 	const reflectionsForDropper = mergeReflections(folded.reflections, sameRunReflections);
-	const droppedIds = await runDropper({
-		model: resolved.model as any,
+	const droppedIds = await workers.runDropper({
+		model: resolved.model,
 		apiKey: resolved.apiKey,
 		headers: resolved.headers,
 		reflections: reflectionsForDropper,
