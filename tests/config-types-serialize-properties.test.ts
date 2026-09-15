@@ -39,7 +39,7 @@ const modeArb = fc.option(fc.oneof(fc.constantFrom("print", "json", "tui", "rpc"
 const modelArb: fc.Arbitrary<ConfiguredModel> = fc.record({
 	provider: fc.constantFrom("openrouter", "anthropic", "google"),
 	id: fc.string({ minLength: 1 }),
-	thinking: fc.option(fc.constantFrom("off", "minimal", "low", "medium", "high", "xhigh"), { nil: undefined }),
+	thinking: fc.option(fc.constantFrom(...THINKING_LEVEL_VALUES), { nil: undefined }),
 });
 const stageNameArb: fc.Arbitrary<StageName> = fc.constantFrom("observer", "reflector", "dropper");
 const thinkingArb = fc.option(fc.constantFrom(...THINKING_LEVEL_VALUES), { nil: undefined });

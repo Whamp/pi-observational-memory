@@ -427,6 +427,24 @@ describe("stage config normalization", () => {
 		});
 	});
 
+	it("parses max thinking for shared and stage settings", () => {
+		writeJson(join(cwd, ".pi", "settings.json"), {
+			"observational-memory": {
+				model: { provider: "openai", id: "shared", thinking: "max" },
+				observer: { thinking: "max" },
+				reflector: { model: { provider: "openrouter", id: "refl", thinking: "max" } },
+				dropper: { thinking: "max" },
+			},
+		});
+
+		expect(loadConfig(cwd, {})).toMatchObject({
+			model: { provider: "openai", id: "shared", thinking: "max" },
+			observer: { thinking: "max" },
+			reflector: { model: { provider: "openrouter", id: "refl", thinking: "max" } },
+			dropper: { thinking: "max" },
+		});
+	});
+
 	it("ignores invalid stage config shapes", () => {
 		writeJson(join(cwd, ".pi", "settings.json"), {
 			"observational-memory": {

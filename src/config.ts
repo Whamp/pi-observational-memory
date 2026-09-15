@@ -92,7 +92,7 @@ export function resolveCompactAfterTokens(config: Config, contextWindow: number 
 	return config.compactAfterTokens;
 }
 
-export const THINKING_LEVEL_VALUES: readonly ModelThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+export const THINKING_LEVEL_VALUES: readonly ModelThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export const COMPACTION_TRIGGER_VALUES: readonly CompactionTrigger[] = ["auto", "native", "agentEnd", "betweenTurns"] as const;
 
 const SETTINGS_KEY = "observational-memory";

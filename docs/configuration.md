@@ -72,7 +72,7 @@ You can omit everything. Defaults work for ordinary sessions, and if `model` is 
 | `passive` | boolean | `false` | Disables proactive background memory and auto-compaction triggers. |
 | `debugLog` | boolean | `false` | Writes best-effort per-session extension debug events to Pi's agent directory. |
 
-Valid `model.thinking` values are `off`, `minimal`, `low`, `medium`, `high`, and `xhigh`.
+Valid `model.thinking` values are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
 
 Invalid values are ignored. Positive-integer settings must be finite integers greater than zero. `compactionTrigger` must be one of `auto`, `native`, `agentEnd`, or `betweenTurns`. `observationsPoolTargetTokens` must also be below `observationsPoolMaxTokens`; if omitted or invalid, it is derived as `Math.floor(observationsPoolMaxTokens / 2)`.
 
@@ -204,7 +204,7 @@ The observer, reflector, and dropper are different jobs and may want different m
 Each stage object has the same shape and accepts:
 
 - `model` (object): a `{ provider, id, thinking? }` override for that stage only.
-- `thinking` (enum): one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh` for that stage only.
+- `thinking` (enum): one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` for that stage only.
 
 Invalid stage config (non-object, empty models, unknown thinking values) is ignored, the same as invalid top-level config.
 
