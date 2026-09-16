@@ -129,11 +129,11 @@ function projectionFromMemoryDetails(details: MemoryDetails): Projection {
 	};
 }
 
-function latestV3CompactionDetails(entries: Entry[]): MemoryDetails | undefined {
+function latestCompactionMemoryDetails(entries: Entry[]): MemoryDetails | undefined {
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
 		if (entry.type !== "compaction") continue;
-		if (isMemoryDetails(entry.details)) return entry.details;
+		return isMemoryDetails(entry.details) ? entry.details : undefined;
 	}
 	return undefined;
 }
@@ -149,7 +149,7 @@ export function fullProjection(entries: Entry[], upToEntryId?: string): Projecti
 
 export function visibleProjection(entries: Entry[], upToEntryId?: string): Projection {
 	if (!upToEntryId) {
-		const details = latestV3CompactionDetails(entries);
+		const details = latestCompactionMemoryDetails(entries);
 		return details ? projectionFromMemoryDetails(details) : { observations: [], reflections: [] };
 	}
 

@@ -5,7 +5,12 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 
 import type { Runtime } from "../runtime.js";
-import { buildCompactionProjection, renderSummary, type Entry } from "../session-ledger/index.js";
+import {
+	buildCompactionProjection,
+	compactionAuthority,
+	renderSummary,
+	type Entry,
+} from "../session-ledger/index.js";
 
 const DEFAULT_OBSERVATIONS_POOL_MAX_TOKENS = 20_000;
 
@@ -33,16 +38,17 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 			runtime.ensureConfig(ctx.cwd);
 			const { preparation, branchEntries } = event;
 			const { firstKeptEntryId, tokensBefore } = preparation;
+			const entries = branchEntries as Entry[];
 			const projection = buildCompactionProjection(
-				branchEntries as Entry[],
+				entries,
 				firstKeptEntryId,
 				{ observationsPoolMaxTokens: observationsPoolMaxTokens(runtime) },
 			);
+			const authority = compactionAuthority(entries, firstKeptEntryId, projection);
+			if (authority.owner === "host") return;
+
 			const summary = renderSummary(projection.reflections, projection.observations);
-			if (summary.length === 0) {
-				// Decline ownership so Pi's native summarizer preserves the pre-cut context.
-				return;
-			}
+			if (summary.length === 0) return;
 
 			return {
 				compaction: {

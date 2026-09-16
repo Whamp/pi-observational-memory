@@ -71,10 +71,11 @@ describe("V3 compaction hook", () => {
 			textCustomMessage("raw-1", "aaaa"),
 			observationsRecordedEntry("om-aaaaaaaaaaaa", { observations: [obs1], coversUpToId: "raw-1" }),
 			reflectionsRecordedEntry("om-eeeeeeeeeeee", { reflections: [ref1], coversUpToId: "raw-1" }),
+			textCustomMessage("raw-2", "bbbb"),
 		];
 		const { run } = setup({ entries, observationsPoolMaxTokens: 100 });
 
-		const result = await run("raw-1") as any;
+		const result = await run("raw-2") as any;
 
 		expect(result.compaction.details.fullFold).toBe(false);
 		expect(result.compaction.details.observations.map((obs: any) => obs.id)).toEqual(["aaaaaaaaaaaa"]);
