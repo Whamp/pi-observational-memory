@@ -72,7 +72,7 @@ describe("source-addressed serialization budget", () => {
 		});
 	});
 
-	it("uses a marked head/tail excerpt when one tool result exceeds the budget", () => {
+	it("does not claim full-source coverage for an oversized first entry", () => {
 		const source = `HEAD:${"m".repeat(2_000)}:TAIL`;
 		const hugeEntry = toolResultEntry("raw-huge", source);
 		const result = serializeSourceAddressedBranchEntries(
@@ -80,25 +80,12 @@ describe("source-addressed serialization budget", () => {
 			{ maxTokens: 100 },
 		);
 
-		expect(result.sourceEntryIds).toEqual(["raw-huge"]);
-		expect(result.truncatedSourceEntryIds).toEqual(["raw-huge"]);
-		expect(result.estimatedTokens).toBeLessThanOrEqual(100);
-		expect(result.text).toContain("[Source entry id: raw-huge]");
-		expect(result.text).toContain("[Tool result for bash");
-		expect(result.text).toContain("HEAD:");
-		expect(result.text).toContain(":TAIL");
-		expect(result.text).toContain(
-			"middle omitted: source exceeds observer input budget",
-		);
-		expect(result.text).toContain(
-			"original source remains in the session ledger",
-		);
-		expect(result.text).not.toContain("raw-next");
-
-		// Budgeting changes only the observer projection. Recall still renders
-		// the original, unmodified ledger entry in full.
-		const recalled = renderRecallSourceEntry(hugeEntry);
-		expect(recalled).toContain(source);
-		expect(recalled?.length).toBeGreaterThan(result.text.length);
+		expect(result).toEqual({
+			text: "",
+			sourceEntryIds: [],
+			estimatedTokens: 0,
+			truncatedSourceEntryIds: [],
+		});
+		expect(renderRecallSourceEntry(hugeEntry)).toContain(source);
 	});
 });

@@ -2,13 +2,17 @@ import { describe, expect, it } from "vitest";
 
 import {
 	OM_FOLDED,
+	OM_OBSERVER_COMPLETED,
 	OM_OBSERVATIONS_DROPPED,
 	OM_OBSERVATIONS_RECORDED,
 	OM_REFLECTIONS_RECORDED,
+	buildObserverCompletedData,
 	buildObservationsDroppedData,
 	buildObservationsRecordedData,
 	buildReflectionsRecordedData,
 	isMemoryDetails,
+	isObserverCompletedData,
+	isObserverCompletedEntry,
 	isObservationsDroppedData,
 	isObservationsDroppedEntry,
 	isObservationsRecordedData,
@@ -20,6 +24,7 @@ import {
 } from "../src/session-ledger/index.js";
 import {
 	memoryDetails,
+	observerCompletedEntry,
 	observation,
 	observationsDroppedEntry,
 	observationsRecordedEntry,
@@ -31,6 +36,7 @@ import {
 
 describe("session-ledger V3 type guards and builders", () => {
 	it("exports the V3 custom type constants", () => {
+		expect(OM_OBSERVER_COMPLETED).toBe("om.observer.completed");
 		expect(OM_OBSERVATIONS_RECORDED).toBe("om.observations.recorded");
 		expect(OM_REFLECTIONS_RECORDED).toBe("om.reflections.recorded");
 		expect(OM_OBSERVATIONS_DROPPED).toBe("om.observations.dropped");
@@ -48,6 +54,17 @@ describe("session-ledger V3 type guards and builders", () => {
 		expect(isReflection(reflection("eeeeeeeeeeee", ["aaaaaaaaaaaa"]))).toBe(true);
 		expect(isReflection({ ...reflection("ffffffffffff"), supportingObservationIds: undefined })).toBe(false);
 		expect(isReflection({ ...reflection("111111111111"), tokenCount: undefined })).toBe(false);
+	});
+
+	it("accepts only explicit Empty observer completion data", () => {
+		expect(isObserverCompletedData({ outcome: "empty", coversUpToId: "raw-1" })).toBe(true);
+		expect(isObserverCompletedData({ outcome: "recorded", coversUpToId: "raw-1" })).toBe(false);
+		expect(buildObserverCompletedData("raw-1")).toEqual({ outcome: "empty", coversUpToId: "raw-1" });
+		expect(buildObserverCompletedData("")).toBeUndefined();
+		expect(isObserverCompletedEntry(observerCompletedEntry("om-empty", {
+			outcome: "empty",
+			coversUpToId: "raw-1",
+		}))).toBe(true);
 	});
 
 	it("accepts non-empty V3 ledger entry data", () => {

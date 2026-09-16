@@ -170,31 +170,14 @@ export type SourceAddressedSerializationOptions = {
 	maxTokens?: number;
 };
 
-const SOURCE_OMISSION_MARKER =
-	"\n\n[… middle omitted: source exceeds observer input budget; original source remains in the session ledger …]\n\n";
-
-function truncateSourceBlockToTokenBudget(label: string, rendered: string, maxTokens: number): string | undefined {
-	const required = `${label}\n${SOURCE_OMISSION_MARKER}`;
-	if (estimateStringTokens(required) > maxTokens) return undefined;
-	const full = `${label}\n${rendered}`;
-	if (estimateStringTokens(full) <= maxTokens) return full;
-	const maxChars = Math.max(1, maxTokens * 4);
-	const fixed = `${label}\n${SOURCE_OMISSION_MARKER}`;
-	const retainedChars = maxChars - fixed.length;
-	const headChars = Math.ceil(retainedChars / 2);
-	const tailChars = retainedChars - headChars;
-	return `${label}\n${rendered.slice(0, headChars)}${SOURCE_OMISSION_MARKER}${tailChars > 0 ? rendered.slice(-tailChars) : ""}`;
-}
-
 function isSourceRenderableEntry(entry: RenderableEntry): boolean {
 	return entry.type === "message" || entry.type === "custom_message" || entry.type === "branch_summary";
 }
 
 /**
- * Serialize complete source entries up to the token budget. If the first entry
- * alone exceeds the budget, include a clearly marked head/tail excerpt so one
- * pathological tool result cannot permanently block observation coverage.
- * The original ledger entry is never modified and remains recallable by id.
+ * Serializes only complete source entries that fit the input budget. An
+ * oversized first entry yields no source because an excerpt cannot establish
+ * full-source observation coverage.
  */
 export function serializeSourceAddressedBranchEntries(
 	entries: RenderableEntry[],
@@ -215,16 +198,7 @@ export function serializeSourceAddressedBranchEntries(
 		const blockTokens = estimateStringTokens(`${separator}${block}`);
 		const maxTokens = options.maxTokens;
 
-		if (maxTokens !== undefined && estimatedTokens + blockTokens > maxTokens) {
-			if (blocks.length > 0) break;
-			const excerpt = truncateSourceBlockToTokenBudget(label, rendered, maxTokens);
-			if (!excerpt) break;
-			blocks.push(excerpt);
-			sourceEntryIds.push(entry.id);
-			truncatedSourceEntryIds.push(entry.id);
-			estimatedTokens = estimateStringTokens(excerpt);
-			break;
-		}
+		if (maxTokens !== undefined && estimatedTokens + blockTokens > maxTokens) break;
 
 		blocks.push(block);
 		sourceEntryIds.push(entry.id);

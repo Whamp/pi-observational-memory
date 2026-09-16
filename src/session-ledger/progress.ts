@@ -1,10 +1,12 @@
 import { estimateEntryTokens } from "../tokens.js";
 import {
+	OM_OBSERVER_COMPLETED,
 	OM_OBSERVATIONS_DROPPED,
 	OM_OBSERVATIONS_RECORDED,
 	OM_REFLECTIONS_RECORDED,
+	isObserverCompletedData,
+	type CoverageCustomType,
 	type Entry,
-	type V3MemoryCustomType,
 } from "./types.js";
 
 const SOURCE_ENTRY_TYPES = new Set(["message", "custom_message", "branch_summary"]);
@@ -33,16 +35,17 @@ function isNonEmptyArray(value: unknown): value is unknown[] {
 	return Array.isArray(value) && value.length > 0;
 }
 
-function isValidCoverageEntry(entry: Entry, customType: V3MemoryCustomType): entry is Entry & { data: { coversUpToId: string } } {
+function isValidCoverageEntry(entry: Entry, customType: CoverageCustomType): entry is Entry & { data: { coversUpToId: string } } {
 	if (entry.type !== "custom" || entry.customType !== customType) return false;
 	if (!isObject(entry.data) || typeof entry.data.coversUpToId !== "string") return false;
 
+	if (customType === OM_OBSERVER_COMPLETED) return isObserverCompletedData(entry.data);
 	if (customType === OM_OBSERVATIONS_RECORDED) return isNonEmptyArray(entry.data.observations);
 	if (customType === OM_REFLECTIONS_RECORDED) return isNonEmptyArray(entry.data.reflections);
 	return isNonEmptyArray(entry.data.observationIds);
 }
 
-export function latestCoverageIndex(entries: Entry[], customType: V3MemoryCustomType): number {
+export function latestCoverageIndex(entries: Entry[], customType: CoverageCustomType): number {
 	const idToIndex = entryIndexById(entries);
 	let latest = -1;
 
@@ -50,13 +53,14 @@ export function latestCoverageIndex(entries: Entry[], customType: V3MemoryCustom
 		if (!isValidCoverageEntry(entry, customType)) continue;
 		const coveredIndex = idToIndex.get(entry.data.coversUpToId);
 		if (coveredIndex === undefined) continue;
+		if (customType === OM_OBSERVER_COMPLETED && !isSourceEntry(entries[coveredIndex])) continue;
 		if (coveredIndex > latest) latest = coveredIndex;
 	}
 
 	return latest;
 }
 
-export function latestCoverageMarkerId(entries: Entry[], customType: V3MemoryCustomType): string | undefined {
+export function latestCoverageMarkerId(entries: Entry[], customType: CoverageCustomType): string | undefined {
 	const idToIndex = entryIndexById(entries);
 	let latestIndex = -1;
 	let latestMarkerId: string | undefined;
@@ -65,6 +69,7 @@ export function latestCoverageMarkerId(entries: Entry[], customType: V3MemoryCus
 		if (!isValidCoverageEntry(entry, customType)) continue;
 		const coveredIndex = idToIndex.get(entry.data.coversUpToId);
 		if (coveredIndex === undefined) continue;
+		if (customType === OM_OBSERVER_COMPLETED && !isSourceEntry(entries[coveredIndex])) continue;
 		if (coveredIndex > latestIndex) {
 			latestIndex = coveredIndex;
 			latestMarkerId = entry.data.coversUpToId;
@@ -94,12 +99,26 @@ export function rawTokensAfterIndex(entries: Entry[], index: number): number {
 	return total;
 }
 
-export function rawTokensSinceCoverage(entries: Entry[], customType: V3MemoryCustomType): number {
+export function rawTokensSinceCoverage(entries: Entry[], customType: CoverageCustomType): number {
 	return rawTokensAfterIndex(entries, latestCoverageIndex(entries, customType));
 }
 
+/** Greatest source boundary covered by either Recorded or explicit Empty observation progress. */
+export function latestObservationCoverageIndex(entries: Entry[]): number {
+	return Math.max(
+		latestCoverageIndex(entries, OM_OBSERVATIONS_RECORDED),
+		latestCoverageIndex(entries, OM_OBSERVER_COMPLETED),
+	);
+}
+
+/** Latest Recorded or explicit Empty observation boundary id. */
+export function latestObservationCoverageMarkerId(entries: Entry[]): string | undefined {
+	const index = latestObservationCoverageIndex(entries);
+	return index >= 0 ? entries[index].id : undefined;
+}
+
 export function rawTokensSinceObservationCoverage(entries: Entry[]): number {
-	return rawTokensSinceCoverage(entries, OM_OBSERVATIONS_RECORDED);
+	return rawTokensAfterIndex(entries, latestObservationCoverageIndex(entries));
 }
 
 export function rawTokensSinceReflectionCoverage(entries: Entry[]): number {
@@ -197,7 +216,7 @@ export function realContextTokensAtCoverage(entries: Entry[], coverageIdx: numbe
  */
 export function realTokensSinceAnchor(
 	entries: Entry[],
-	customType: V3MemoryCustomType | undefined,
+	customType: CoverageCustomType | undefined,
 	currentContextTokens: number,
 ): number | undefined {
 	const coverageIdx = customType ? latestCoverageIndex(entries, customType) : -1;
@@ -210,6 +229,28 @@ export function realTokensSinceAnchor(
 	}
 	if (coverageIdx >= 0) {
 		const baseline = realContextTokensAtCoverage(entries, coverageIdx);
+		if (baseline === undefined) return undefined;
+		const delta = currentContextTokens - baseline;
+		return delta >= 0 ? delta : undefined;
+	}
+	return Math.max(0, currentContextTokens);
+}
+
+/** Provider-reported context growth since Recorded or explicit Empty observation progress. */
+export function realTokensSinceObservationCoverage(
+	entries: Entry[],
+	currentContextTokens: number,
+): number | undefined {
+	const observationIndex = latestObservationCoverageIndex(entries);
+	const compactionIndex = findLastCompactionIndex(entries);
+	if (compactionIndex > observationIndex) {
+		const baseline = realContextTokensAfterCompaction(entries, compactionIndex);
+		if (baseline === undefined) return undefined;
+		const delta = currentContextTokens - baseline;
+		return delta >= 0 ? delta : undefined;
+	}
+	if (observationIndex >= 0) {
+		const baseline = realContextTokensAtCoverage(entries, observationIndex);
 		if (baseline === undefined) return undefined;
 		const delta = currentContextTokens - baseline;
 		return delta >= 0 ? delta : undefined;

@@ -5,6 +5,7 @@ import {
 	compactionEntry,
 	memoryDetails,
 	observation,
+	observerCompletedEntry,
 	observationsDroppedEntry,
 	observationsRecordedEntry,
 	oldV2CompactionDetails,
@@ -165,6 +166,23 @@ describe("V3 compaction hook", () => {
 				observations: [neededObservation],
 				coversUpToId: "raw-3",
 			}),
+		];
+		const { run } = setup({ entries });
+
+		await expect(run("raw-2")).resolves.toBeUndefined();
+	});
+
+	it("does not treat durable Empty scheduling progress as replacement completeness", async () => {
+		const staleObservation = observation("aaaaaaaaaaaa", { sourceEntryIds: ["raw-old"] });
+		const entries = [
+			textCustomMessage("raw-old", "older source"),
+			observationsRecordedEntry("om-stale", {
+				observations: [staleObservation],
+				coversUpToId: "raw-old",
+			}),
+			textCustomMessage("raw-1", "new source to prune"),
+			observerCompletedEntry("om-empty", { outcome: "empty", coversUpToId: "raw-1" }),
+			textCustomMessage("raw-2", "first kept source"),
 		];
 		const { run } = setup({ entries });
 

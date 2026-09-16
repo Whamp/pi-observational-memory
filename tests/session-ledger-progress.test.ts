@@ -6,6 +6,7 @@ import {
 	isSourceEntry,
 	latestCoverageIndex,
 	latestCoverageMarkerId,
+	latestObservationCoverageIndex,
 	rawTokensAfterIndex,
 	rawTokensSinceDropCoverage,
 	rawTokensSinceLastCompaction,
@@ -13,12 +14,14 @@ import {
 	rawTokensSinceReflectionCoverage,
 } from "../src/session-ledger/index.js";
 import {
+	V3_OBSERVER_COMPLETED,
 	V3_OBSERVATIONS_DROPPED,
 	V3_OBSERVATIONS_RECORDED,
 	V3_REFLECTIONS_RECORDED,
 	branchSummary,
 	compactionEntry,
 	observation,
+	observerCompletedEntry,
 	observationsDroppedEntry,
 	observationsRecordedEntry,
 	oldV2ObservationEntry,
@@ -84,6 +87,23 @@ describe("session-ledger V3 progress helpers", () => {
 
 		expect(latestCoverageIndex(entries, V3_OBSERVATIONS_DROPPED)).toBe(1);
 		expect(rawTokensSinceDropCoverage(entries)).toBe(2);
+	});
+
+	it("advances observation scheduling from the greatest Recorded or explicit Empty boundary", () => {
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			observationsRecordedEntry("om-recorded", {
+				observations: [observation("aaaaaaaaaaaa")],
+				coversUpToId: "raw-1",
+			}),
+			textCustomMessage("raw-2", "bbbbbbbb"),
+			observerCompletedEntry("om-empty", { outcome: "empty", coversUpToId: "raw-2" }),
+			textCustomMessage("raw-3", "cccccccccccc"),
+		];
+
+		expect(latestCoverageIndex(entries, V3_OBSERVER_COMPLETED)).toBe(2);
+		expect(latestObservationCoverageIndex(entries)).toBe(2);
+		expect(rawTokensSinceObservationCoverage(entries)).toBe(3);
 	});
 
 	it("chooses the max covered branch position, not merely latest ledger entry order", () => {
