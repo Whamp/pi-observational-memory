@@ -190,7 +190,8 @@ function debugSessionMetadata(ctx: ConsolidationCtx): { sessionId?: string; sess
 			sessionId: ctx.sessionManager.getSessionId?.(),
 			sessionFile: ctx.sessionManager.getSessionFile?.(),
 		};
-	} catch {
+	} catch (error) {
+		debugLog("session.metadata_failed", { error: String(error) });
 		return {};
 	}
 }
