@@ -90,7 +90,7 @@ export function compactionAuthority(
 		return { owner: "host", reason: "no-pruned-source" };
 	}
 
-	const projectedObservations = new Set(projection.observations);
+	const projectedObservationIds = new Set(projection.observations.map((observation) => observation.id));
 	let coverageBoundaryIndex = -1;
 	let projectedCoverageBoundaryIndex = -1;
 	for (let entryIndex = 0; entryIndex < entries.length; entryIndex++) {
@@ -100,7 +100,7 @@ export function compactionAuthority(
 		if (coveredIndex === undefined) continue;
 		if (!recordedBatchHasSourceIntegrity(entry, entryIndex, coveredIndex, entries, indexes)) continue;
 		coverageBoundaryIndex = Math.max(coverageBoundaryIndex, coveredIndex);
-		if (entry.data.observations.every((observation) => projectedObservations.has(observation))) {
+		if (entry.data.observations.every((observation) => projectedObservationIds.has(observation.id))) {
 			projectedCoverageBoundaryIndex = Math.max(projectedCoverageBoundaryIndex, coveredIndex);
 		}
 	}

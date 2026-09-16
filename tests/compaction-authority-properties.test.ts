@@ -38,7 +38,7 @@ function authorityFor(entries: Entry[], firstKeptEntryId: string) {
 	const projection = buildCompactionProjection(entries, firstKeptEntryId, {
 		observationsPoolMaxTokens: Number.POSITIVE_INFINITY,
 	});
-	return compactionAuthority(entries, firstKeptEntryId, projection);
+	return compactionAuthority(entries, firstKeptEntryId, structuredClone(projection));
 }
 
 const boundaryScenarioArb = fc.integer({ min: 2, max: 12 }).chain((count) =>
