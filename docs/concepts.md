@@ -70,9 +70,9 @@ Dropping does not delete history. Dropped observations remain recallable from le
 
 ### Observer
 
-The observer runs asynchronously from `turn_end` when raw/source tokens after the latest observation coverage marker reach `observeAfterTokens`. After a deliberate empty result, it waits for another `observeAfterTokens` of source tokens before retrying the uncovered range.
+The observer runs asynchronously from `turn_end` when raw/source tokens after the latest observation scheduling boundary reach `observeAfterTokens`.
 
-It receives an oldest-first chunk of raw/source entries, validates source ids, and appends a non-empty `om.observations.recorded` entry. Chunking targets a fixed 60,000 estimated tokens but always includes at least one entry, so a single oversized entry cannot stall coverage. If there is nothing worth recording, it writes no entry and leaves the raw range uncovered.
+It receives an oldest-first chunk of complete raw/source entries, validates source ids, and returns one of three outcomes. Recorded appends non-empty `om.observations.recorded`; explicit Empty appends `om.observer.completed` and advances only the scheduling clock; Failed appends no progress. Oversized entries are never represented as fully covered by a head/tail excerpt.
 
 ### Reflector
 
@@ -95,13 +95,18 @@ The compaction hook runs during `session_before_compact`. When V3 memory exists,
 - it does not wait for background memory workers;
 - it folds/projects ledger state and renders the summary.
 
-If the projection is empty, the hook returns no extension compaction and Pi uses its native summarizer. This preserves pre-cut context instead of persisting an empty summary. Prepared V3 compactions remain effectively instantaneous compared with V2.
+The hook returns an extension compaction only when the projection itself contains observation records covering Pi's newly pruned source boundary. Empty-only scheduling progress, stale non-empty memory, and projection-excluded cross-boundary batches delegate to Pi's native summarizer. Covered V3 compactions remain effectively instantaneous compared with V2.
 
 ## Ledger entries
 
-V3 uses three custom memory ledger entry types:
+V3 uses four custom memory ledger entry types:
 
 ```ts
+om.observer.completed: {
+  outcome: "empty";
+  coversUpToId: string;
+}
+
 om.observations.recorded: {
   observations: Observation[];
   coversUpToId: string;
@@ -134,7 +139,7 @@ Old V2 memory entry/details formats are ignored.
 
 ## `coversUpToId`
 
-`coversUpToId` is a progress watermark. It tells V3 where a worker's raw/source-token progress has reached.
+`coversUpToId` is a progress watermark. It tells V3 where a worker's raw/source-token progress has reached. Observer scheduling uses the greatest valid Recorded or explicit Empty boundary; reflector, dropper, projection, and compaction authority remain tied to their own recorded memory evidence.
 
 It is not:
 

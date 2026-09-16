@@ -2,7 +2,7 @@
 
 This is the V3 technical reference for `pi-observational-memory`.
 
-V3 is ledger-centered: memory state is reconstructed by folding V3 ledger entries on the current branch. When that projection is non-empty, V3 renders it model-free into the summary the agent sees. Empty projections delegate to Pi's native summarizer.
+V3 is ledger-centered: memory state is reconstructed by folding V3 ledger entries on the current branch. It renders a projection model-free only when that exact projection includes observations covering the source Pi will prune. Otherwise Pi's native summarizer owns compaction.
 
 ## Runtime entry points
 
@@ -73,7 +73,7 @@ Every V3 ledger entry has `data.coversUpToId`. That field is a progress and proj
 
 | Worker/trigger | Progress source |
 |---|---|
-| Observer | latest `om.observations.recorded.data.coversUpToId` |
+| Observer scheduling | greatest valid `om.observations.recorded` or explicit Empty `om.observer.completed` boundary |
 | Reflector | latest `om.reflections.recorded.data.coversUpToId` |
 | Dropper | latest `om.observations.dropped.data.coversUpToId` |
 | Auto-compaction | latest compaction boundary |
@@ -81,6 +81,18 @@ Every V3 ledger entry has `data.coversUpToId`. That field is a progress and proj
 The watermark is also used to decide whether a memory ledger entry belongs to a bounded projection. It is not provenance. Provenance lives in `sourceEntryIds` and `supportingObservationIds`.
 
 ## Ledger data shapes
+
+### Observer completed Empty
+
+```ts
+customType: "om.observer.completed"
+data: {
+  outcome: "empty";
+  coversUpToId: string;
+}
+```
+
+This records successful scheduling progress without fabricating memory. It does not advance reflector/dropper evidence or grant compaction authority.
 
 ### Observations recorded
 
@@ -163,18 +175,17 @@ The observer trigger runs on `turn_end`.
 1. Load config if needed.
 2. Skip if `passive` is true.
 3. Skip if `observerInFlight` is true.
-4. Count raw/source tokens since latest observation coverage.
+4. Count raw/source tokens since the greatest valid Recorded or explicit Empty observation boundary.
 5. Skip if below `observeAfterTokens`.
-6. Honor any deliberate-empty backoff until another `observeAfterTokens` of source tokens arrive.
-7. Select the oldest size-capped chunk after the latest observation coverage marker.
-8. Serialize those source entries for the observer prompt.
-9. Resolve the memory model.
-10. Run `runObserver()` in a background task.
-11. Validate source ids returned by the model.
-12. Compute deterministic 12-character ids and per-observation token counts in code.
-13. Append `om.observations.recorded` only if at least one observation was accepted.
+6. Select the oldest complete-entry chunk after that boundary.
+7. Serialize those source entries for the observer prompt.
+8. Resolve the observer's stage model through Pi's provider/authentication path.
+9. Run `runObserver()` in a background task.
+10. Validate source ids returned by the model.
+11. Compute deterministic 12-character ids and per-observation rendered-line token counts in code.
+12. Append `om.observations.recorded` for Recorded or `om.observer.completed` for explicit Empty.
 
-If no observations are generated, the worker writes no entry and does not advance coverage. A later eligible observer run will see a larger range. Deliberate empty runs back off until another `observeAfterTokens` worth of new source tokens arrives, so they do not re-fire every turn. Observer chunks target a fixed 60,000 estimated tokens, oldest-first, so an oversized uncovered span drains in slices; the oldest entry is always included even if it alone exceeds the target, preventing coverage from stalling. API/stream failures surface as `observer failed` / `observer.stream_error` rather than as an empty run.
+Silence, rejected proposals, malformed output, API errors, aborted streams, and empty input are Failed outcomes and append no progress. Explicit Empty is durable, so the same source is not reconsidered after restart, but it does not become replacement context. Chunks include only complete entries; an oversized first entry produces no observer call rather than a false full-source provenance claim.
 
 ## Reflect/drop flow
 
@@ -212,7 +223,7 @@ ledger entries and compaction metadata contribute zero. The trigger uses this
 same raw metric before scheduling and in the deferred re-check, then calls
 `ctx.compact()` when all checks pass.
 
-This trigger does not wait for observer, reflector, or dropper promises. That is intentional: background memory work should never make compaction feel stuck.
+This trigger does not wait for observer, reflector, or dropper promises. That is intentional: background memory work should never make compaction feel stuck. With `compactionTrigger: "native"`, the extension skips this proactive call and leaves timing to Pi; its compaction hook still participates.
 
 ## Compaction hook
 
@@ -224,9 +235,9 @@ It does only deterministic work:
 2. Load config if needed.
 3. Read `event.preparation.firstKeptEntryId` and `event.preparation.tokensBefore`.
 4. Build a compaction projection from branch entries and `firstKeptEntryId`.
-5. Render a summary from projected reflections and observations.
-6. If the summary is empty, return no extension result so Pi uses native compaction.
-7. Otherwise return `{ compaction: { summary, firstKeptEntryId, tokensBefore, details } }` where `details.type` is `om.folded`.
+5. Prove that a projected observation batch covers the newly pruned source boundary.
+6. If that proof fails, return no extension result so Pi uses native compaction.
+7. Render the authorized projection and return `{ compaction: { summary, firstKeptEntryId, tokensBefore, details } }` where `details.type` is `om.folded`.
 
 It does not:
 
@@ -236,7 +247,7 @@ It does not:
 - wait for worker promises;
 - append ledger entries.
 
-If another compaction hook is already in flight, it returns `{ cancel: true }`. Delegating an empty projection is intentionally different: Pi proceeds with its native summarizer so pre-cut context is preserved.
+If another compaction hook is already in flight, it returns `{ cancel: true }`. Authority depends on projected Recorded evidence, not merely on a non-empty summary or a later watermark. This prevents stale memory and cross-boundary batches omitted by the projection from replacing pruned source.
 
 ## Projections
 
@@ -327,7 +338,7 @@ Recall ignores old V2 memory by construction because it indexes only V3 ledger e
 
 - Worker in-flight flags prevent duplicate observer or reflect/drop runs.
 - Observer priority prevents reflect/drop from advancing while source text is due for observation.
-- No-output workers append no empty ledger entries.
+- Only an explicit structured Empty observer outcome appends `om.observer.completed`; silence and failure append no progress.
 - Invalid source/support/drop ids are filtered or rejected by code.
 - Background worker errors are recorded on runtime state and surfaced in `/om:status`.
 - Compaction does not wait for background workers; it folds whatever ledger state is already present.
@@ -341,8 +352,8 @@ V3 does not use V2 state shapes. Old V2 custom memory entries, old V2 compaction
 
 - The branch-local V3 ledger is the memory source of truth.
 - Pi compaction summaries represent what the agent sees.
-- Non-empty V3 compaction projections are deterministic and model-free; empty projections delegate to Pi's native summarizer.
-- Observer input is raw/source entries only.
+- Coverage-authorized V3 compaction projections are deterministic and model-free; all other projections delegate to Pi's native summarizer.
+- Observer input is raw/source entries only and coverage is never inferred from partial-entry excerpts.
 - `coversUpToId` is a progress/projection watermark, not provenance.
 - Kept observations and reflections are rendered without paraphrase.
 - Dropped observations remain recallable from ledger history.

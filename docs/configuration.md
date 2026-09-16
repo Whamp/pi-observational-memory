@@ -36,6 +36,8 @@ The extension loads config once for its runtime. After changing settings, restar
     "observationsPoolMaxTokens": 20000,
     "observationsPoolTargetTokens": 10000,
     "agentMaxTurns": 16,
+    "agentMaxTokens": 32000,
+    "compactionTrigger": "agentSettled",
     "model": {
       "provider": "openrouter",
       "id": "google/gemma-4-31b-it",
@@ -62,7 +64,9 @@ You can omit everything. Defaults work for ordinary sessions, and if `model` is 
 | `observationsPoolTargetTokens` | positive integer below max | half of `observationsPoolMaxTokens` | Folded active observation target used by post-reflection dropper maintenance. |
 | `agentMaxTurns` | positive integer | `16` | Shared nested-agent turn cap for observer, reflector, and dropper. |
 | `agentMaxTokens` | positive integer | `32000` | Maximum output tokens requested for memory-agent loops. Clamped to the model's own `maxTokens` when available. Lower it for local servers with a modest context window. |
-| `model` | object | unset | Optional model override for observer, reflector, and dropper. |
+| `compactionTrigger` | enum | `"agentSettled"` | `"agentSettled"` enables proactive compaction from Pi's settled lifecycle; `"native"` leaves timing to Pi. |
+| `model` | object | unset | Optional shared model override for observer, reflector, and dropper. |
+| `observer`, `reflector`, `dropper` | object | unset | Optional per-stage `{ model, thinking }` overrides. |
 | `model.provider` | string | unset | Provider name in Pi's model registry. Required when `model` is set. |
 | `model.id` | string | unset | Model id in Pi's model registry. Required when `model` is set. |
 | `model.thinking` | enum | unset; workers fall back to `low` | Optional reasoning/thinking level for memory workers. |
@@ -78,17 +82,17 @@ Invalid values are ignored. Positive-integer settings must be finite integers gr
 
 Default: `10000`.
 
-The observer runs from Pi's `turn_end` hook. It counts raw/source tokens after the latest `om.observations.recorded.data.coversUpToId` marker. When the count reaches `observeAfterTokens`, the observer receives source entries after that marker and may append a non-empty `om.observations.recorded` ledger entry.
+The observer runs from Pi's `turn_end` hook. It counts raw/source tokens after the greatest valid `om.observations.recorded` or `om.observer.completed` boundary. When the count reaches `observeAfterTokens`, the observer receives source entries after that marker.
 
-Lower values create smaller chunks and more frequent model calls. Higher values reduce model-call frequency but let unobserved raw conversation accumulate longer. If the observer deliberately emits no observations, no ledger entry is written; the same range remains uncovered, and the observer retries after another `observeAfterTokens` of source tokens accumulate.
+A successful run appends either non-empty `om.observations.recorded` data or an explicit `om.observer.completed { outcome: "empty", coversUpToId }` marker. Both advance scheduling. Silence, malformed output, rejected proposals, stream errors, and aborted runs are failures and do not advance coverage. Empty is scheduling evidence only; it never gives observational memory compaction authority.
 
 ## `observerChunkMaxTokens`
 
 Default: derived as 20% of the resolved memory model's context window, or `60000` when that window is unavailable.
 
-This caps the source-addressed text sent to one observer run. Complete source entries are added oldest-first while they fit; remaining entries stay eligible for later runs. If the oldest entry alone exceeds the budget, the observer receives a clearly marked head/tail excerpt instead of an over-context request. The original session entry is not modified, and observations still cite its original source id so the source remains traceable in the session ledger.
+This caps the source-addressed text sent to one observer run. Complete source entries are added oldest-first while they fit; remaining entries stay eligible for later runs. If the oldest entry cannot fit, the observer does not receive a head/tail excerpt because an excerpt cannot justify full-source coverage. The source remains uncovered, and compaction delegates to Pi whenever that source affects the prune boundary.
 
-Set an explicit value when a provider exposes a context window that differs from Pi's model metadata. Values below `256` are clamped to `256` so a chunk can always carry a complete source label, omission marker, and useful context. Keep room for the observer system prompt, prior observations/reflections, tool schemas, and output; setting this equal to the full model window will usually fail.
+Set an explicit value when a provider exposes a context window that differs from Pi's model metadata. Values below `256` are clamped to `256`. Keep room for the observer system prompt, prior observations/reflections, tool schemas, and output; setting this equal to the full model window will usually fail.
 
 ## `reflectAfterTokens`
 
@@ -106,9 +110,9 @@ Default: `81000`.
 
 The auto-compaction trigger runs from Pi's `agent_settled` hook, after retries, automatic compaction, and queued continuation finish. It counts estimated source-entry tokens after the latest compaction boundary. The count starts at `firstKeptEntryId` when Pi provides that boundary, so retained source entries remain part of the metric. Memory ledger entries and compaction metadata contribute zero. If the count reaches `compactAfterTokens`, the extension defers with `setTimeout(0)`, checks that Pi is idle, re-checks the same metric, and calls `ctx.compact()`. Pi's provider context usage is not used for this threshold.
 
-This trigger does not wait for observer, reflector, or dropper work. Actual compaction summary creation happens later in `session_before_compact`. A non-empty V3 projection is rendered deterministically and model-free; an empty projection delegates to Pi's native summarizer so prior context is not replaced by an empty summary.
+This trigger does not wait for observer, reflector, or dropper work. Actual summary creation happens later in `session_before_compact`. Observational memory owns that compaction only when the replacement projection includes observation records covering the newly pruned source boundary. Stale memory, Empty-only progress, and cross-boundary batches excluded from the projection delegate to Pi's native summarizer.
 
-Pi's own window-pressure compaction and manual compaction can still happen independently of this proactive trigger.
+Pi's own window-pressure compaction and manual compaction can still happen independently of this proactive trigger. Set `compactionTrigger` to `"native"` to disable only the extension's proactive call; the coverage-gated compaction hook remains active. Existing fork values `auto`, `agentEnd`, and `betweenTurns` normalize to `"agentSettled"`; the old abort/hidden-continuation behavior is intentionally not retained.
 
 ## `observationsPoolMaxTokens`
 
@@ -152,7 +156,7 @@ Lower it when the memory model is a local server with a modest context window (f
 
 Default: unset, meaning memory workers use the session model.
 
-Set `model` when you want the observer, reflector, and dropper to use a cheaper or faster model than the main coding agent:
+Set `model` when you want all three stages to use a cheaper or faster model than the main coding agent:
 
 ```json
 {
@@ -165,6 +169,8 @@ Set `model` when you want the observer, reflector, and dropper to use a cheaper 
   }
 }
 ```
+
+Each of `observer`, `reflector`, and `dropper` may also provide `{ "model": { "provider": "…", "id": "…" }, "thinking": "…" }`. Observer and reflector fall back to the shared model. Dropper falls back through reflector, then shared. Stage settings use the same provider/authentication/environment/base-URL path as every other memory model.
 
 `provider` and `id` must both be non-empty strings. `thinking` is optional. If the configured model cannot be resolved, the runtime attempts to fall back to the current session model and notifies once. Memory workers accept either an API key or OAuth-style auth headers (e.g. `Authorization: Bearer …`), so OAuth-authenticated providers work without an API key. If no usable model or credentials are available, the relevant background worker skips/fails safely rather than inventing memory.
 

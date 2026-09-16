@@ -2,7 +2,7 @@
 > **V3 update notice:** this extension now uses the new V3 memory model. If you used V2, update your `observational-memory` settings before running this version. V3 does **not** read the old V2 settings or memory format, and you should start a new clean Pi session after upgrading. See [Migrating from V2](#migrating-from-v2).
 
 > [!NOTE]
-> The `master` branch is the active development branch and may include unreleased or unstable changes. For stable versions, install the published npm package with `pi install npm:pi-observational-memory`.
+> This fork is source-distributed and intentionally non-publishing. npm publication, release identity, and registry setup are deferred; install it from GitHub or a local checkout.
 
 # pi-observational-memory
 
@@ -175,17 +175,15 @@ This extension is especially useful when the session contains decisions that sho
 
 Requires Pi 0.81.0 or newer. Proactive compaction uses the `agent_settled` lifecycle event introduced in that release.
 
-```bash
-pi install npm:pi-observational-memory
-```
-
-Or install from GitHub/local development:
+Install this fork from GitHub or a local checkout:
 
 ```bash
-pi install git:github.com/elpapi42/pi-observational-memory
-# or, from a local checkout:
+pi install git:github.com/Whamp/pi-observational-memory
+# or
 pi install /absolute/path/to/pi-observational-memory
 ```
+
+The repository is marked `private` in `package.json` to prevent accidental npm publication.
 
 Pi loads the extension from `src/index.ts` through the package `pi.extensions` entry.
 
@@ -215,6 +213,8 @@ A typical config:
     "observationsPoolMaxTokens": 20000,
     "observationsPoolTargetTokens": 10000,
     "agentMaxTurns": 16,
+    "agentMaxTokens": 32000,
+    "compactionTrigger": "agentSettled",
     "model": {
       "provider": "openrouter",
       "id": "google/gemma-4-31b-it",
@@ -276,7 +276,7 @@ on the `Next compaction` line regardless of mode.
 | Setting                     | Default       | Meaning                                                                                           |
 | --------------------------- | ------------- | ------------------------------------------------------------------------------------------------- |
 | `observeAfterTokens`        | `10000`       | Raw/source token threshold for observation runs.                                                  |
-| `observerChunkMaxTokens`    | derived       | Max estimated tokens serialized into one observer chunk (minimum `256`). Unset: `floor(contextWindow * 0.2)` of the resolved memory model, or `60000` when the window is unknown. Larger backlogs drain oldest-first; a single over-budget source is sent as a marked head/tail excerpt while the original source remains in the session ledger. |
+| `observerChunkMaxTokens`    | derived       | Max estimated tokens serialized into one observer chunk (minimum `256`). Unset: `floor(contextWindow * 0.2)` of the resolved memory model, or `60000` when the window is unknown. Complete entries drain oldest-first; an entry that cannot fit is not excerpted or marked covered. |
 | `reflectAfterTokens`        | `20000`       | Raw/source token threshold for reflection runs; successful reflection creates dropper opportunities. |
 | `compactAfterTokens`        | `81000`       | Estimated source-entry threshold for proactive auto-compaction, counted after the latest compaction boundary. |
 | `compactAfterTokensMode`    | `"calibrated"`| `"calibrated"` uses `compactAfterTokens` directly. `"ratio"` scales the source-entry threshold by the active model's `contextWindow`. |
@@ -285,7 +285,9 @@ on the `Next compaction` line regardless of mode.
 | `observationsPoolTargetTokens` | half of max | Active observation target used by post-reflection dropper maintenance.                            |
 | `agentMaxTurns`             | `16`          | Shared turn cap for background memory-agent loops.                                                |
 | `agentMaxTokens`            | `32000`       | Maximum output tokens requested for memory-agent loops (observer/reflector/dropper), clamped to the model's own `maxTokens` when available. Lower it for local servers with a modest context window, e.g. `8192`. |
-| `model`                     | session model | Optional memory-worker model override: `{ provider, id, thinking }`.                              |
+| `compactionTrigger`         | `"agentSettled"` | `"agentSettled"` enables proactive compaction from Pi's native settled lifecycle; `"native"` disables the extension trigger while retaining the compaction hook. Legacy fork values map to `"agentSettled"`. |
+| `model`                     | session model | Optional shared memory-worker model override: `{ provider, id, thinking }`.                       |
+| `observer`, `reflector`, `dropper` | unset | Optional per-stage `{ model, thinking }` overrides. Dropper inherits the reflector model/thinking before the shared model. |
 | `showWorkerNotifications`   | `true`        | Shows routine observer, reflector, and dropper progress notifications. Warnings and errors are unaffected. |
 | `passive`                   | `false`       | Disables proactive background observation, reflection, maintenance, and auto-compaction triggers. |
 | `debugLog`                  | `false`       | Writes opt-in per-session extension debug events to Pi's agent directory.                         |
@@ -300,7 +302,7 @@ Valid `model.thinking` values are:
 * `xhigh`
 * `max`
 
-If no `model` is configured, memory workers use the session model, including custom `pi.registerProvider` APIs such as `cursor-sdk`. You do not need a second built-in provider (OpenAI, OpenRouter, …) for observational memory to run. Set `model` only when you want cheaper or faster workers than the coding agent.
+If no model override is configured, memory workers use the session model, including custom `pi.registerProvider` APIs such as `cursor-sdk`. Per-stage overrides use the same Pi model registry, composed provider streams, authentication headers, environment, and base URL as the shared/session model path. You do not need a second built-in provider for observational memory to run.
 
 Set `showWorkerNotifications` to `false` to hide routine worker start and completion messages (including deliberate-empty observer info messages). Model fallback/unavailability, worker failures (including observer stream errors), compaction notifications, and explicit `/om:*` command output remain visible.
 
@@ -368,7 +370,7 @@ Current behavior:
 
 * **Observation-centered memory.** The extension records useful session observations while you work.
 * **Durable reflections.** The extension distills stable facts that help the agent stay oriented over time.
-* **Fast compaction.** When prepared V3 memory exists, `session_before_compact` renders it without calling a model or waiting for background workers. An empty V3 projection delegates to Pi's native summarizer instead of replacing prior context with an empty summary.
+* **Fast, coverage-gated compaction.** `session_before_compact` renders prepared memory without a model only when the returned projection contains observation records covering the source Pi will prune. Otherwise Pi's native summarizer owns compaction. Durable Empty observer progress advances scheduling but does not prove replacement completeness.
 * **Background memory work.** Observation and reflection work run from `turn_end` when their token clocks are due; dropper work runs only after successful reflection and prunes the folded active observation ledger toward `observationsPoolTargetTokens`.
 * **Source-backed recall.** Observations and reflections can be traced back through the `recall` tool.
 * **Visible/full views.** `/om:view` shows visible memory and `/om:view full` shows the full current memory state. Use `/om:status` for visible-vs-full drift and for the separate visible observation pool vs active observation pool.
@@ -448,6 +450,7 @@ V3 equivalent:
 * [`docs/concepts.md`](docs/concepts.md) — vocabulary and V3 mental model.
 * [`docs/how-it-works.md`](docs/how-it-works.md) — lifecycle, memory shapes, projections, and recall flow.
 * [`docs/configuration.md`](docs/configuration.md) — all V3 settings and migration notes.
+* [`docs/publication.md`](docs/publication.md) — source-only installation and deferred release work.
 
 ---
 
