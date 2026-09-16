@@ -353,7 +353,7 @@ describe("V3 consolidation trigger", () => {
 		const { fire, runLaunchedWork, runtime } = setup({ entries, reflectAfterTokens: 999, sessionId: "private-session" });
 		runtime.resolveModel.mockResolvedValueOnce({
 			ok: true,
-			model: { provider: "custom", baseUrl: "https://opencode.ai.attacker.example/v1" },
+			model: { provider: "opencode-go", baseUrl: "https://opencode.ai.attacker.example/v1" },
 			apiKey: "custom-key",
 		});
 

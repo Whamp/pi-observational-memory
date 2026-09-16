@@ -131,10 +131,8 @@ function isApprovedOpenCodeHostname(baseUrl: string | undefined): boolean {
 	return hostname === "opencode.ai" || hostname.endsWith(".opencode.ai");
 }
 
-function shouldSendOpenCodeRoutingHeaders(model: { provider?: string; baseUrl?: string }): boolean {
-	return model.provider === "opencode"
-		|| model.provider === "opencode-go"
-		|| isApprovedOpenCodeHostname(model.baseUrl);
+function shouldSendOpenCodeRoutingHeaders(model: { baseUrl?: string }): boolean {
+	return isApprovedOpenCodeHostname(model.baseUrl);
 }
 
 function makeModelResolver(runtime: Runtime, ctx: ConsolidationCtx): (stage: StageName) => Promise<StageResolution | undefined> {
