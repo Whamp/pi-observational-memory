@@ -231,6 +231,35 @@ describe("V3 consolidation trigger", () => {
 		expect(pi.appendEntry).toHaveBeenCalledWith(OM_OBSERVATIONS_RECORDED, { observations: [obs], coversUpToId: "raw-1" });
 	});
 
+	it("resolves stage-specific models and thinking through the shared provider path", async () => {
+		const obs = observation("cccccccccccc", { sourceEntryIds: ["raw-1"], tokenCount: 4 });
+		mockAgents.runObserver.mockResolvedValueOnce({ outcome: "recorded", observations: [obs] });
+		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
+		const { fire, runLaunchedWork, runtime } = setup({ entries });
+		(runtime.config as any).observer = {
+			model: { provider: "observer-provider", id: "observer-model" },
+			thinking: "high",
+		};
+		(runtime.config as any).reflector = {
+			model: { provider: "reflector-provider", id: "reflector-model" },
+			thinking: "medium",
+		};
+
+		fire();
+		await runLaunchedWork();
+
+		expect(runtime.resolveModel).toHaveBeenNthCalledWith(1, expect.any(Object), {
+			provider: "observer-provider",
+			id: "observer-model",
+		});
+		expect(runtime.resolveModel).toHaveBeenNthCalledWith(2, expect.any(Object), {
+			provider: "reflector-provider",
+			id: "reflector-model",
+		});
+		expect(mockAgents.runObserver).toHaveBeenCalledWith(expect.objectContaining({ thinkingLevel: "high" }));
+		expect(mockAgents.runReflector).toHaveBeenCalledWith(expect.objectContaining({ thinkingLevel: "medium" }));
+	});
+
 	it("forwards OAuth-shaped auth (headers, no apiKey) to the observer agent", async () => {
 		const obs = observation("cccccccccccc", { sourceEntryIds: ["raw-1"], tokenCount: 4 });
 		mockAgents.runObserver.mockResolvedValueOnce({ outcome: "recorded", observations: [obs] });
@@ -307,6 +336,44 @@ describe("V3 consolidation trigger", () => {
 			ok: true,
 			model: { provider: "custom", baseUrl: "https://opencode.ai/zen/go/v1" },
 			apiKey: "go-key",
+		});
+
+		fire();
+		await runLaunchedWork();
+
+		expect(mockAgents.runObserver).toHaveBeenCalledWith(expect.objectContaining({
+			headers: { "x-opencode-session": "session-1", "x-opencode-client": "pi" },
+		}));
+	});
+
+	it("does not send session headers to a hostname that only contains opencode.ai", async () => {
+		const obs = observation("cccccccccccc", { sourceEntryIds: ["raw-1"], tokenCount: 4 });
+		mockAgents.runObserver.mockResolvedValueOnce({ outcome: "recorded", observations: [obs] });
+		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
+		const { fire, runLaunchedWork, runtime } = setup({ entries, reflectAfterTokens: 999, sessionId: "private-session" });
+		runtime.resolveModel.mockResolvedValueOnce({
+			ok: true,
+			model: { provider: "custom", baseUrl: "https://opencode.ai.attacker.example/v1" },
+			apiKey: "custom-key",
+		});
+
+		fire();
+		await runLaunchedWork();
+
+		expect(mockAgents.runObserver).toHaveBeenCalledWith(expect.objectContaining({
+			headers: undefined,
+		}));
+	});
+
+	it("sends session headers to a controlled opencode.ai subdomain", async () => {
+		const obs = observation("cccccccccccc", { sourceEntryIds: ["raw-1"], tokenCount: 4 });
+		mockAgents.runObserver.mockResolvedValueOnce({ outcome: "recorded", observations: [obs] });
+		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
+		const { fire, runLaunchedWork, runtime } = setup({ entries, reflectAfterTokens: 999, sessionId: "session-1" });
+		runtime.resolveModel.mockResolvedValueOnce({
+			ok: true,
+			model: { provider: "custom", baseUrl: "https://api.opencode.ai/v1" },
+			apiKey: "custom-key",
 		});
 
 		fire();

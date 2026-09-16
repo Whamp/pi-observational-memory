@@ -1,10 +1,15 @@
+import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { runDropper } from "../agents/dropper/agent.js";
 import { observationPoolMetrics } from "../agents/dropper/pool.js";
 import { runObserver } from "../agents/observer/agent.js";
 import { runReflector } from "../agents/reflector/agent.js";
 import { debugLog, withDebugLogContext } from "../debug-log.js";
-import { resolveObserverChunkMaxTokens } from "../config.js";
+import {
+	resolveObserverChunkMaxTokens,
+	resolveStageModel,
+	type StageName,
+} from "../config.js";
 import type { ResolveResult, Runtime } from "../runtime.js";
 import { serializeSourceAddressedBranchEntries } from "../serialize.js";
 import {
@@ -35,6 +40,7 @@ import {
 } from "../session-ledger/index.js";
 
 type ResolvedModel = Extract<ResolveResult, { ok: true }>;
+type StageResolution = ResolvedModel & { thinking: ModelThinkingLevel };
 
 type ConsolidationCtx = {
 	cwd: string;
@@ -120,38 +126,57 @@ function shouldNotifyWorker(runtime: Runtime, ctx: ConsolidationCtx): boolean {
 	return runtime.config.showWorkerNotifications && ctx.hasUI;
 }
 
-function makeModelResolver(runtime: Runtime, ctx: ConsolidationCtx): (stage: "observer" | "reflector" | "dropper") => Promise<ResolvedModel | undefined> {
-	let cached: ResolveResult | undefined;
+function isApprovedOpenCodeHostname(baseUrl: string | undefined): boolean {
+	if (!baseUrl) return false;
+	try {
+		const hostname = new URL(baseUrl).hostname.toLowerCase();
+		return hostname === "opencode.ai" || hostname.endsWith(".opencode.ai");
+	} catch {
+		return false;
+	}
+}
+
+function shouldSendOpenCodeRoutingHeaders(model: { provider?: string; baseUrl?: string }): boolean {
+	return model.provider === "opencode"
+		|| model.provider === "opencode-go"
+		|| isApprovedOpenCodeHostname(model.baseUrl);
+}
+
+function makeModelResolver(runtime: Runtime, ctx: ConsolidationCtx): (stage: StageName) => Promise<StageResolution | undefined> {
+	const cache = new Map<StageName, StageResolution>();
 	return async (stage) => {
-		cached ??= await runtime.resolveModel({
+		const cached = cache.get(stage);
+		if (cached) return cached;
+		const desired = resolveStageModel(runtime.config, stage);
+		const resolved = await runtime.resolveModel({
 			model: ctx.model,
 			modelRegistry: ctx.modelRegistry,
 			hasUI: ctx.hasUI,
 			ui: ctx.ui,
-		});
-		if (cached.ok) {
+		}, desired.model);
+		if (resolved.ok) {
 			runtime.resolveFailureNotified = false;
-			// Console Go (opencode.ai) rejects requests without x-opencode-session
-			// (400 MissingSessionID). Mirror pi's own session headers on worker calls.
-			const model = (cached.model ?? {}) as { provider?: string; baseUrl?: string };
-			if (model.provider === "opencode" || model.provider === "opencode-go" || (typeof model.baseUrl === "string" && model.baseUrl.includes("opencode.ai"))) {
+			let result: StageResolution = { ...resolved, thinking: desired.thinking };
+			const model = (resolved.model ?? {}) as { provider?: string; baseUrl?: string };
+			if (shouldSendOpenCodeRoutingHeaders(model)) {
 				const sessionId = ctx.sessionManager.getSessionId?.();
 				if (sessionId) {
-					return {
-						...cached,
+					result = {
+						...result,
 						headers: {
-							...(cached.headers ?? {}),
+							...(resolved.headers ?? {}),
 							"x-opencode-session": sessionId,
 							"x-opencode-client": "pi",
 						},
 					};
 				}
 			}
-			return cached;
+			cache.set(stage, result);
+			return result;
 		}
-		debugLog(`${stage}.model_unavailable`, { reason: cached.reason });
+		debugLog(`${stage}.model_unavailable`, { reason: resolved.reason });
 		if (!runtime.resolveFailureNotified && ctx.hasUI && ctx.ui) {
-			ctx.ui.notify(`Observational memory: ${stage} skipped — ${cached.reason}`, "warning");
+			ctx.ui.notify(`Observational memory: ${stage} skipped — ${resolved.reason}`, "warning");
 			runtime.resolveFailureNotified = true;
 		}
 		return undefined;
@@ -245,7 +270,7 @@ async function runObserverStage(
 	pi: ExtensionAPI,
 	runtime: Runtime,
 	ctx: ConsolidationCtx,
-	resolveModel: (stage: "observer") => Promise<ResolvedModel | undefined>,
+	resolveModel: (stage: "observer") => Promise<StageResolution | undefined>,
 ): Promise<StageOutcome> {
 	const entries = ctx.sessionManager.getBranch() as Entry[];
 	const currentTokens = realContextTokens(ctx);
@@ -319,7 +344,7 @@ async function runObserverStage(
 		allowedSourceEntryIds: sourceEntryIds,
 		maxTurns: runtime.config.agentMaxTurns,
 		maxOutputTokens: runtime.config.agentMaxTokens,
-		thinkingLevel: runtime.config.model?.thinking ?? "low",
+		thinkingLevel: resolved.thinking,
 		modelRegistry: ctx.modelRegistry,
 	});
 	if (result.outcome === "failed") {
@@ -363,7 +388,7 @@ async function runReflectorStage(
 	pi: ExtensionAPI,
 	runtime: Runtime,
 	ctx: ConsolidationCtx,
-	resolveModel: (stage: "reflector") => Promise<ResolvedModel | undefined>,
+	resolveModel: (stage: "reflector") => Promise<StageResolution | undefined>,
 ): Promise<ReflectorStageResult> {
 	const entries = ctx.sessionManager.getBranch() as Entry[];
 	const currentTokens = realContextTokens(ctx);
@@ -391,7 +416,7 @@ async function runReflectorStage(
 		observations: folded.activeObservations,
 		maxTurns: runtime.config.agentMaxTurns,
 		maxOutputTokens: runtime.config.agentMaxTokens,
-		thinkingLevel: runtime.config.model?.thinking ?? "low",
+		thinkingLevel: resolved.thinking,
 		modelRegistry: ctx.modelRegistry,
 	});
 	if (!reflections) return { outcome: "continue", sameRunReflections: [] };
@@ -410,7 +435,7 @@ async function runDropperStage(
 	pi: ExtensionAPI,
 	runtime: Runtime,
 	ctx: ConsolidationCtx,
-	resolveModel: (stage: "dropper") => Promise<ResolvedModel | undefined>,
+	resolveModel: (stage: "dropper") => Promise<StageResolution | undefined>,
 	sameRunReflections: Reflection[],
 	sameRunReflectionCoverageId: string | undefined,
 ): Promise<StageOutcome> {
@@ -467,7 +492,7 @@ async function runDropperStage(
 		targetTokens: runtime.config.observationsPoolTargetTokens,
 		maxTurns: runtime.config.agentMaxTurns,
 		maxOutputTokens: runtime.config.agentMaxTokens,
-		thinkingLevel: runtime.config.model?.thinking ?? "low",
+		thinkingLevel: resolved.thinking,
 		modelRegistry: ctx.modelRegistry,
 	});
 	const coversUpToId = earlierCoverageMarkerId(entries, observationCoverageId, sameRunReflectionCoverageId);

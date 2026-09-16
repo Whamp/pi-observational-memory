@@ -8,7 +8,7 @@ export function registerCompactionTrigger(pi: ExtensionAPI, runtime: Runtime): v
 	// continuation have finished, so retry policy stays owned by Pi.
 	pi.on("agent_settled", (_event, ctx) => {
 		runtime.ensureConfig(ctx.cwd);
-		if (runtime.config.passive === true) return;
+		if (runtime.config.passive === true || runtime.config.compactionTrigger === "native") return;
 		if (runtime.compactInFlight) return;
 
 		const entries = ctx.sessionManager?.getBranch?.() as Entry[] | undefined;

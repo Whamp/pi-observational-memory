@@ -9,6 +9,17 @@ export interface ConfiguredModel {
 	thinking?: ModelThinkingLevel;
 }
 
+/** One independently configurable memory worker stage. */
+export type StageName = "observer" | "reflector" | "dropper";
+/** Proactive compaction uses Pi's settled event unless explicitly disabled. */
+export type CompactionTrigger = "agentSettled" | "native";
+
+/** Optional model and thinking overrides for one memory worker stage. */
+export interface StageModelConfig {
+	model?: ConfiguredModel;
+	thinking?: ModelThinkingLevel;
+}
+
 /**
  * How `compactAfterTokens` is interpreted.
  *
@@ -54,6 +65,10 @@ export interface Config {
 	 */
 	agentMaxTokens: number;
 	model?: ConfiguredModel;
+	observer?: StageModelConfig;
+	reflector?: StageModelConfig;
+	dropper?: StageModelConfig;
+	compactionTrigger: CompactionTrigger;
 	showWorkerNotifications: boolean;
 	passive: boolean;
 	debugLog: boolean;
@@ -69,6 +84,7 @@ export const DEFAULTS: Config = {
 	observationsPoolTargetTokens: 10_000,
 	agentMaxTurns: 16,
 	agentMaxTokens: 32_000,
+	compactionTrigger: "agentSettled",
 	showWorkerNotifications: true,
 	passive: false,
 	debugLog: false,
@@ -94,6 +110,7 @@ export function resolveCompactAfterTokens(config: Config, contextWindow: number 
 }
 
 export const THINKING_LEVEL_VALUES: readonly ModelThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export const COMPACTION_TRIGGER_VALUES: readonly CompactionTrigger[] = ["agentSettled", "native"] as const;
 
 /** Observer chunk cap used when no config is set and the model's context window is unknown. */
 export const OBSERVER_CHUNK_FALLBACK_MAX_TOKENS = 60_000;
@@ -157,6 +174,14 @@ function isThinkingLevel(value: unknown): value is ModelThinkingLevel {
 	return typeof value === "string" && (THINKING_LEVEL_VALUES as readonly string[]).includes(value);
 }
 
+function normalizeCompactionTrigger(value: unknown): CompactionTrigger | undefined {
+	if (value === "native") return "native";
+	if (value === "agentSettled" || value === "auto" || value === "agentEnd" || value === "betweenTurns") {
+		return "agentSettled";
+	}
+	return undefined;
+}
+
 function isCompactAfterTokensMode(value: unknown): value is CompactAfterTokensMode {
 	return typeof value === "string" && (COMPACT_AFTER_TOKENS_MODE_VALUES as readonly string[]).includes(value);
 }
@@ -188,6 +213,15 @@ function normalizeModel(value: unknown): ConfiguredModel | undefined {
 	return model;
 }
 
+function normalizeStageConfig(value: unknown): StageModelConfig | undefined {
+	if (!isRecord(value)) return undefined;
+	const stage: StageModelConfig = {};
+	const model = normalizeModel(value.model);
+	if (model) stage.model = model;
+	if (isThinkingLevel(value.thinking)) stage.thinking = value.thinking;
+	return stage.model !== undefined || stage.thinking !== undefined ? stage : undefined;
+}
+
 function normalizeSettingsConfig(value: Record<string, unknown>): Partial<Config> {
 	const normalized: Partial<Config> = {};
 	const numberKeys = [
@@ -212,9 +246,39 @@ function normalizeSettingsConfig(value: Record<string, unknown>): Partial<Config
 	if (typeof value.showWorkerNotifications === "boolean") normalized.showWorkerNotifications = value.showWorkerNotifications;
 	if (typeof value.passive === "boolean") normalized.passive = value.passive;
 	if (typeof value.debugLog === "boolean") normalized.debugLog = value.debugLog;
+	const compactionTrigger = normalizeCompactionTrigger(value.compactionTrigger);
+	if (compactionTrigger) normalized.compactionTrigger = compactionTrigger;
 	const model = normalizeModel(value.model);
 	if (model) normalized.model = model;
+	for (const stageName of ["observer", "reflector", "dropper"] as const) {
+		const stage = normalizeStageConfig(value[stageName]);
+		if (stage) normalized[stageName] = stage;
+	}
 	return normalized;
+}
+
+/** Resolves the configured model inherited by one memory stage. */
+export function resolveStageModelConfig(config: Config, stage: StageName): ConfiguredModel | undefined {
+	if (stage === "observer") return config.observer?.model ?? config.model;
+	if (stage === "reflector") return config.reflector?.model ?? config.model;
+	return config.dropper?.model ?? config.reflector?.model ?? config.model;
+}
+
+/** Resolves the thinking level inherited by one memory stage. */
+export function resolveStageThinking(config: Config, stage: StageName): ModelThinkingLevel {
+	const shared = config.model?.thinking ?? "low";
+	const reflectorThinking = config.reflector?.thinking ?? config.reflector?.model?.thinking ?? shared;
+	if (stage === "observer") return config.observer?.thinking ?? config.observer?.model?.thinking ?? shared;
+	if (stage === "reflector") return reflectorThinking;
+	return config.dropper?.thinking ?? config.dropper?.model?.thinking ?? reflectorThinking;
+}
+
+/** Resolves a stage's model override and thinking level together. */
+export function resolveStageModel(
+	config: Config,
+	stage: StageName,
+): { model?: ConfiguredModel; thinking: ModelThinkingLevel } {
+	return { model: resolveStageModelConfig(config, stage), thinking: resolveStageThinking(config, stage) };
 }
 
 export function readEnvConfig(env: NodeJS.ProcessEnv = process.env): Partial<Config> {

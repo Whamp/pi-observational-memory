@@ -9,7 +9,13 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
 	getAgentDir: () => mock.agentDir,
 }));
 
-import { DEFAULTS, loadConfig, readEnvConfig, resolveCompactAfterTokens } from "../src/config.js";
+import {
+	DEFAULTS,
+	loadConfig,
+	readEnvConfig,
+	resolveCompactAfterTokens,
+	resolveStageModel,
+} from "../src/config.js";
 
 function writeJson(path: string, value: unknown) {
 	mkdirSync(join(path, ".."), { recursive: true });
@@ -45,6 +51,7 @@ describe("V3 config", () => {
 			observationsPoolTargetTokens: 10000,
 			agentMaxTurns: 16,
 			agentMaxTokens: 32000,
+			compactionTrigger: "agentSettled",
 			showWorkerNotifications: true,
 			passive: false,
 			debugLog: false,
@@ -89,6 +96,53 @@ describe("V3 config", () => {
 			passive: true,
 			debugLog: true,
 		});
+	});
+
+	it("preserves fork stage model and thinking configuration", () => {
+		writeJson(join(cwd, ".pi", "settings.json"), {
+			"observational-memory": {
+				model: { provider: "shared", id: "base", thinking: "low" },
+				observer: {
+					model: { provider: "observer-provider", id: "observer-model", thinking: "medium" },
+					thinking: "high",
+				},
+				reflector: { model: { provider: "reflector-provider", id: "reflector-model" } },
+				dropper: { thinking: "max" },
+			},
+		});
+
+		const config = loadConfig(cwd, {});
+		expect(resolveStageModel(config, "observer")).toEqual({
+			model: { provider: "observer-provider", id: "observer-model", thinking: "medium" },
+			thinking: "high",
+		});
+		expect(resolveStageModel(config, "reflector")).toEqual({
+			model: { provider: "reflector-provider", id: "reflector-model" },
+			thinking: "low",
+		});
+		expect(resolveStageModel(config, "dropper")).toEqual({
+			model: { provider: "reflector-provider", id: "reflector-model" },
+			thinking: "max",
+		});
+	});
+
+	it.each(["auto", "agentEnd", "betweenTurns"])(
+		"maps legacy fork compaction trigger %s to Pi's settled lifecycle",
+		(compactionTrigger) => {
+			writeJson(join(cwd, ".pi", "settings.json"), {
+				"observational-memory": { compactionTrigger },
+			});
+
+			expect(loadConfig(cwd, {}).compactionTrigger).toBe("agentSettled");
+		},
+	);
+
+	it("keeps explicit native compaction mode", () => {
+		writeJson(join(cwd, ".pi", "settings.json"), {
+			"observational-memory": { compactionTrigger: "native" },
+		});
+
+		expect(loadConfig(cwd, {}).compactionTrigger).toBe("native");
 	});
 
 	it("accepts max as a valid model thinking level", () => {

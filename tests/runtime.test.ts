@@ -22,6 +22,21 @@ describe("Runtime V3 behavior", () => {
 		expect(result).toEqual({ ok: true, model: configured, apiKey: "key", headers: { test: "yes" } });
 	});
 
+	it("uses an explicit stage model override instead of the shared model", async () => {
+		const runtime = new Runtime();
+		const stageModel = { provider: "openai", id: "observer" };
+		const registry = modelRegistry({ found: stageModel });
+		runtime.config = { ...runtime.config, model: { provider: "anthropic", id: "shared" } };
+
+		const result = await runtime.resolveModel(
+			{ model: { provider: "session" }, modelRegistry: registry, hasUI: false },
+			{ provider: "openai", id: "observer" },
+		);
+
+		expect(registry.find).toHaveBeenCalledWith("openai", "observer");
+		expect(result).toMatchObject({ ok: true, model: stageModel });
+	});
+
 	it("falls back to session model and notifies when configured model is missing", async () => {
 		const runtime = new Runtime();
 		const notify = vi.fn();
