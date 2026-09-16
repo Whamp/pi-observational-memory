@@ -110,6 +110,7 @@ export function resolveCompactAfterTokens(config: Config, contextWindow: number 
 }
 
 export const THINKING_LEVEL_VALUES: readonly ModelThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+/** Supported proactive compaction lifecycle modes. */
 export const COMPACTION_TRIGGER_VALUES: readonly CompactionTrigger[] = ["agentSettled", "native"] as const;
 
 /** Observer chunk cap used when no config is set and the model's context window is unknown. */

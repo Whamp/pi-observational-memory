@@ -40,6 +40,7 @@ export type Reflection = {
 	tokenCount: number;
 };
 
+/** Ledger payload for an explicit successful observer run with no new facts. */
 export interface ObserverCompletedEntryData {
 	outcome: "empty";
 	coversUpToId: string;
