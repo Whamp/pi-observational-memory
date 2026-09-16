@@ -23,7 +23,7 @@ type Observation = {
   timestamp: string;          // YYYY-MM-DD HH:MM
   relevance: "low" | "medium" | "high" | "critical";
   sourceEntryIds: string[];   // raw/source entries that support this observation
-  tokenCount: number;         // estimated content tokens
+  tokenCount: number;         // estimated rendered summary-line tokens
 }
 ```
 
