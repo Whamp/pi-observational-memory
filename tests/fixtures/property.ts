@@ -185,5 +185,5 @@ export function idsOf<T extends { id: string }>(values: readonly T[]): string[] 
 }
 
 export function sorted(values: Iterable<string>): string[] {
-	return Array.from(values).sort();
+	return Array.from(values).sort((left, right) => left.localeCompare(right, "en"));
 }

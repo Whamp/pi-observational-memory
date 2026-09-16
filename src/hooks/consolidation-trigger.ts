@@ -1,4 +1,4 @@
-import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
+import type { Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { runDropper } from "../agents/dropper/agent.js";
 import { observationPoolMetrics } from "../agents/dropper/pool.js";
@@ -34,7 +34,6 @@ import {
 	rawTokensSinceReflectionCoverage,
 	reflectionToSummaryLine,
 	type Entry,
-	type Observation,
 	type Reflection,
 	type V3MemoryCustomType,
 } from "../session-ledger/index.js";
@@ -127,13 +126,9 @@ function shouldNotifyWorker(runtime: Runtime, ctx: ConsolidationCtx): boolean {
 }
 
 function isApprovedOpenCodeHostname(baseUrl: string | undefined): boolean {
-	if (!baseUrl) return false;
-	try {
-		const hostname = new URL(baseUrl).hostname.toLowerCase();
-		return hostname === "opencode.ai" || hostname.endsWith(".opencode.ai");
-	} catch {
-		return false;
-	}
+	if (!baseUrl || !URL.canParse(baseUrl)) return false;
+	const hostname = new URL(baseUrl).hostname.toLowerCase();
+	return hostname === "opencode.ai" || hostname.endsWith(".opencode.ai");
 }
 
 function shouldSendOpenCodeRoutingHeaders(model: { provider?: string; baseUrl?: string }): boolean {
@@ -164,7 +159,7 @@ function makeModelResolver(runtime: Runtime, ctx: ConsolidationCtx): (stage: Sta
 					result = {
 						...result,
 						headers: {
-							...(resolved.headers ?? {}),
+							...resolved.headers,
 							"x-opencode-session": sessionId,
 							"x-opencode-client": "pi",
 						},
@@ -334,7 +329,7 @@ async function runObserverStage(
 	});
 
 	const result = await runObserver({
-		model: resolved.model as any,
+		model: resolved.model as Model<any>,
 		apiKey: resolved.apiKey,
 		headers: resolved.headers,
 		env: resolved.env,
@@ -408,7 +403,7 @@ async function runReflectorStage(
 
 	const folded = foldLedger(entries);
 	const reflections = await runReflector({
-		model: resolved.model as any,
+		model: resolved.model as Model<any>,
 		apiKey: resolved.apiKey,
 		headers: resolved.headers,
 		env: resolved.env,
@@ -483,7 +478,7 @@ async function runDropperStage(
 
 	const reflectionsForDropper = mergeReflections(folded.reflections, sameRunReflections);
 	const droppedIds = await runDropper({
-		model: resolved.model as any,
+		model: resolved.model as Model<any>,
 		apiKey: resolved.apiKey,
 		headers: resolved.headers,
 		env: resolved.env,

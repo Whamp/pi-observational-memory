@@ -41,10 +41,10 @@
     "@earendil-works/pi-tui": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "^0.81.0",
-    "@earendil-works/pi-ai": "^0.81.0",
-    "@earendil-works/pi-coding-agent": "^0.81.0",
-    "@earendil-works/pi-tui": "^0.81.0",
+    "@earendil-works/pi-agent-core": "^0.85.1",
+    "@earendil-works/pi-ai": "^0.85.1",
+    "@earendil-works/pi-coding-agent": "^0.85.1",
+    "@earendil-works/pi-tui": "^0.85.1",
     "@types/node": "^22.0.0",
     "fast-check": "^4.10.1",
     "typebox": "^1.1.38",

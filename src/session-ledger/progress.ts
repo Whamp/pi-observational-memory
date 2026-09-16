@@ -136,12 +136,6 @@ export function findLastCompactionIndex(entries: Entry[]): number {
 	return -1;
 }
 
-// ==== Real (provider-reported) token accounting ====
-//
-// These helpers measure context growth from provider-reported usage for the
-// observation and reflection coverage clocks. Automatic compaction keeps its
-// separate raw source-entry clock because its setting counts ledger entries.
-
 type UsageLike = {
 	totalTokens?: number;
 	input?: number;

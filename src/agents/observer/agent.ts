@@ -110,17 +110,19 @@ export function normalizeSourceEntryIds(
 	return Array.from(seen).sort((a, b) => (allowedOrder.get(a) ?? 0) - (allowedOrder.get(b) ?? 0));
 }
 
-/** Runs the observer and distinguishes Recorded, explicit Empty, and failed protocol outcomes. */
-export async function runObserver(args: RunObserverArgs): Promise<ObserverOutcome> {
-	const { model, apiKey, headers, env, priorReflections, priorObservations, chunk, allowedSourceEntryIds, signal } = args;
-	const conversation = chunk.trim();
-	if (!conversation) return { outcome: "failed", reason: "no_structured_outcome" };
+interface ObserverCollectionState {
+	accumulated: Map<string, Observation>;
+	rejectedCount: number;
+	explicitlyEmpty: boolean;
+}
 
-	const accumulated = new Map<string, Observation>();
-	let rejectedCount = 0;
-	let explicitlyEmpty = false;
+type ObserverTerminalStreamError = { stopReason: string; errorMessage?: string };
 
-	const recordObservations: AgentTool<typeof RecordObservationsSchema> = {
+function createRecordObservationsTool(
+	state: ObserverCollectionState,
+	allowedSourceEntryIds: readonly string[],
+): AgentTool<typeof RecordObservationsSchema> {
+	return {
 		name: "record_observations",
 		label: "Record observations",
 		description:
@@ -132,7 +134,7 @@ export async function runObserver(args: RunObserverArgs): Promise<ObserverOutcom
 			let added = 0;
 			let duplicates = 0;
 			let rejected = 0;
-			if (params.observations.length === 0) explicitlyEmpty = true;
+			if (params.observations.length === 0) state.explicitlyEmpty = true;
 			for (const obs of params.observations) {
 				const sourceEntryIds = normalizeSourceEntryIds(obs.sourceEntryIds, allowedSourceEntryIds);
 				if (!sourceEntryIds) {
@@ -141,11 +143,11 @@ export async function runObserver(args: RunObserverArgs): Promise<ObserverOutcom
 				}
 				const content = truncateRecordContent(obs.content);
 				const id = hashId(content);
-				if (accumulated.has(id)) {
+				if (state.accumulated.has(id)) {
 					duplicates++;
 					continue;
 				}
-				accumulated.set(id, {
+				state.accumulated.set(id, {
 					id,
 					content,
 					timestamp: obs.timestamp,
@@ -160,7 +162,7 @@ export async function runObserver(args: RunObserverArgs): Promise<ObserverOutcom
 				});
 				added++;
 			}
-			rejectedCount += rejected;
+			state.rejectedCount += rejected;
 			const rejectedPart = rejected > 0
 				? ` ${rejected} observation${rejected === 1 ? "" : "s"} rejected for missing or invalid sourceEntryIds.`
 				: "";
@@ -168,11 +170,40 @@ export async function runObserver(args: RunObserverArgs): Promise<ObserverOutcom
 				`Recorded ${added} new observation${added === 1 ? "" : "s"} ` +
 				(duplicates > 0 ? `(${duplicates} duplicate${duplicates === 1 ? "" : "s"} skipped).` : ".") +
 				rejectedPart +
-				` Total so far this run: ${accumulated.size}. ` +
+				` Total so far this run: ${state.accumulated.size}. ` +
 				`Continue if the chunk still has uncovered content; otherwise stop calling the tool and emit a short plain-text confirmation.`;
-			return { content: [{ type: "text", text: ack }], details: { added, duplicates, rejected, total: accumulated.size } };
+			return { content: [{ type: "text", text: ack }], details: { added, duplicates, rejected, total: state.accumulated.size } };
 		},
 	};
+}
+
+function observerOutcome(
+	state: ObserverCollectionState,
+	streamError: ObserverTerminalStreamError | undefined,
+): ObserverOutcome {
+	if (state.accumulated.size > 0) {
+		return { outcome: "recorded", observations: Array.from(state.accumulated.values()) };
+	}
+	if (streamError) throw new ObserverStreamError(streamError.stopReason, streamError.errorMessage);
+	if (state.rejectedCount > 0) {
+		return { outcome: "failed", reason: "rejected_proposals", rejectedCount: state.rejectedCount };
+	}
+	if (state.explicitlyEmpty) return { outcome: "empty" };
+	return { outcome: "failed", reason: "no_structured_outcome" };
+}
+
+/** Runs the observer and distinguishes Recorded, explicit Empty, and failed protocol outcomes. */
+export async function runObserver(args: RunObserverArgs): Promise<ObserverOutcome> {
+	const { model, apiKey, headers, env, priorReflections, priorObservations, chunk, allowedSourceEntryIds, signal } = args;
+	const conversation = chunk.trim();
+	if (!conversation) return { outcome: "failed", reason: "no_structured_outcome" };
+
+	const state: ObserverCollectionState = {
+		accumulated: new Map<string, Observation>(),
+		rejectedCount: 0,
+		explicitlyEmpty: false,
+	};
+	const recordObservations = createRecordObservationsTool(state, allowedSourceEntryIds);
 
 	const now = nowTimestamp();
 	const userText = `Current local time: ${now}
@@ -233,7 +264,7 @@ ${conversation}`;
 		signal,
 		resolveWorkerStreamSimple(model, args.modelRegistry, args.streamSimple),
 	);
-	let streamError: { stopReason: string; errorMessage?: string } | undefined;
+	let streamError: ObserverTerminalStreamError | undefined;
 	for await (const event of stream) {
 		// Drain events; the tool's execute already collects records.
 		logAgentStreamError("observer", event);
@@ -246,13 +277,5 @@ ${conversation}`;
 	}
 	await stream.result();
 
-	if (accumulated.size > 0) {
-		return { outcome: "recorded", observations: Array.from(accumulated.values()) };
-	}
-	if (streamError) throw new ObserverStreamError(streamError.stopReason, streamError.errorMessage);
-	if (rejectedCount > 0) {
-		return { outcome: "failed", reason: "rejected_proposals", rejectedCount };
-	}
-	if (explicitlyEmpty) return { outcome: "empty" };
-	return { outcome: "failed", reason: "no_structured_outcome" };
+	return observerOutcome(state, streamError);
 }
