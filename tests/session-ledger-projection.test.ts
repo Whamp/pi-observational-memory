@@ -60,6 +60,41 @@ describe("session-ledger V3 projections", () => {
 		expect(visibleProjection(entries)).toEqual({ observations: [obs2], reflections: [ref1] });
 	});
 
+	it("resets visible structured memory when a native compaction follows an OM compaction", () => {
+		const obs = observation("aaaaaaaaaaaa");
+		const ref = reflection("eeeeeeeeeeee", ["aaaaaaaaaaaa"]);
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			compactionEntry("cmp-om", {
+				firstKeptEntryId: "raw-1",
+				details: memoryDetails({ observations: [obs], reflections: [ref] }),
+			}),
+			textCustomMessage("raw-2", "bbbb"),
+			compactionEntry("cmp-native", { firstKeptEntryId: "raw-2" }),
+		];
+
+		expect(visibleProjection(entries)).toEqual({ observations: [], reflections: [] });
+	});
+
+	it("uses fresh OM details after a native-to-observational-memory transition", () => {
+		const stale = observation("aaaaaaaaaaaa");
+		const fresh = observation("bbbbbbbbbbbb");
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			compactionEntry("cmp-om-1", {
+				firstKeptEntryId: "raw-1",
+				details: memoryDetails({ observations: [stale] }),
+			}),
+			compactionEntry("cmp-native", { firstKeptEntryId: "raw-1" }),
+			compactionEntry("cmp-om-2", {
+				firstKeptEntryId: "raw-1",
+				details: memoryDetails({ observations: [fresh] }),
+			}),
+		];
+
+		expect(visibleProjection(entries)).toEqual({ observations: [fresh], reflections: [] });
+	});
+
 	it("ignores old V2 compaction details for visible projection", () => {
 		const entries = [
 			textCustomMessage("raw-1", "aaaa"),

@@ -133,6 +133,68 @@ describe("V3 compaction hook", () => {
 		expect(result.compaction.details.reflections.map((ref: any) => ref.id)).toEqual(["eeeeeeeeeeee", "ffffffffffff"]);
 	});
 
+	it("delegates when a cross-boundary covering batch is absent from the replacement", async () => {
+		const entries = [
+			textCustomMessage("raw-1", "pruned source"),
+			textCustomMessage("raw-2", "first kept source"),
+			textCustomMessage("raw-3", "later source"),
+			observationsRecordedEntry("om-cross-boundary", {
+				observations: [observation("aaaaaaaaaaaa", { sourceEntryIds: ["raw-1"] })],
+				coversUpToId: "raw-3",
+			}),
+		];
+		const { run } = setup({ entries });
+
+		await expect(run("raw-2")).resolves.toBeUndefined();
+	});
+
+	it("delegates stale non-empty memory when the covering batch is absent from the replacement", async () => {
+		const staleObservation = observation("aaaaaaaaaaaa", { sourceEntryIds: ["raw-old"] });
+		const neededObservation = observation("bbbbbbbbbbbb", { sourceEntryIds: ["raw-1"] });
+		const entries = [
+			textCustomMessage("raw-old", "older source"),
+			observationsRecordedEntry("om-stale", {
+				observations: [staleObservation],
+				coversUpToId: "raw-old",
+			}),
+			textCustomMessage("raw-1", "pruned source"),
+			textCustomMessage("raw-2", "first kept source"),
+			textCustomMessage("raw-3", "later source"),
+			observationsRecordedEntry("om-cross-boundary", {
+				observations: [neededObservation],
+				coversUpToId: "raw-3",
+			}),
+		];
+		const { run } = setup({ entries });
+
+		await expect(run("raw-2")).resolves.toBeUndefined();
+	});
+
+	it("allows observational memory after native compaction when fresh coverage is projected", async () => {
+		const staleObservation = observation("aaaaaaaaaaaa", { sourceEntryIds: ["raw-old"] });
+		const freshObservation = observation("bbbbbbbbbbbb", { sourceEntryIds: ["raw-new"] });
+		const entries = [
+			textCustomMessage("raw-old", "older source"),
+			observationsRecordedEntry("om-old", {
+				observations: [staleObservation],
+				coversUpToId: "raw-old",
+			}),
+			compactionEntry("cmp-native", { firstKeptEntryId: "raw-old" }),
+			textCustomMessage("raw-new", "new source to prune"),
+			observationsRecordedEntry("om-new", {
+				observations: [freshObservation],
+				coversUpToId: "raw-new",
+			}),
+			textCustomMessage("raw-kept", "first kept source"),
+		];
+		const { run } = setup({ entries });
+
+		const result = await run("raw-kept") as any;
+
+		expect(result.compaction.details.observations).toContainEqual(freshObservation);
+		expect(result.compaction.summary).toContain("bbbbbbbbbbbb");
+	});
+
 	it("delegates to native compaction when only old V2 memory exists", async () => {
 		const entries = [
 			textCustomMessage("raw-1", "aaaa"),
