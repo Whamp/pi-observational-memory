@@ -28,3 +28,15 @@ When updating this file, preserve this bar for all agents and keep entries conci
 - Pi context pressure and compactable history are separate conditions. Extension-requested `ctx.compact()` can fail before `session_before_compact` when Pi finds no removable range, while Pi-native compaction handles this path separately.
 - `firstKeptEntryId` is a retention boundary, not a zero-progress boundary. Retained source entries can already exceed `compactAfterTokens`, so cadence changes must test consecutive post-success turns and distinguish successful repetition from failed-attempt backoff.
 <!-- opm:managed:end -->
+
+This repository uses the single-context domain documentation layout. See `docs/agents/domain.md`.
+
+<!-- lane:protocol -->
+## Context memory
+
+- Before editing a file, read `.lane/memory/<path>/` if it exists, or run `lane why <path>`.
+- Record non-obvious findings with `lane note add <path> -a <anchor> "..."`.
+- Do not edit `.lane/` by hand; landing manages it.
+- Land with `lane merge`, or `lane push` where trunk is protected, then `lane prune` once it merges.
+- Detailed workflow lives in `.agents/skills/lane/SKILL.md`; run `lane install skill` if it is absent.
+<!-- /lane:protocol -->
