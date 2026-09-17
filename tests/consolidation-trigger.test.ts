@@ -6,12 +6,15 @@ const mockAgents = vi.hoisted(() => ({
 	runDropper: vi.fn(),
 }));
 
-vi.mock("../src/agents/observer/agent.js", () => ({ runObserver: mockAgents.runObserver }));
+vi.mock("../src/agents/observer/agent.js", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../src/agents/observer/agent.js")>()),
+	runObserver: mockAgents.runObserver,
+}));
 vi.mock("../src/agents/reflector/agent.js", () => ({ runReflector: mockAgents.runReflector }));
 vi.mock("../src/agents/dropper/agent.js", () => ({ runDropper: mockAgents.runDropper }));
 
+import { ObserverStreamError } from "../src/agents/observer/agent.js";
 import { registerConsolidationTrigger } from "../src/hooks/consolidation-trigger.js";
-import type { StageModelConfig } from "../src/config.js";
 import {
 	OM_OBSERVER_COMPLETED,
 	OM_OBSERVATIONS_DROPPED,
@@ -20,6 +23,7 @@ import {
 } from "../src/session-ledger/index.js";
 import {
 	observation,
+	observerCompletedEntry,
 	observationsDroppedEntry,
 	observationsRecordedEntry,
 	reflection,
@@ -41,17 +45,17 @@ function setup(args: {
 	entries: TestEntry[];
 	observeAfterTokens?: number;
 	reflectAfterTokens?: number;
+	observerChunkMaxTokens?: number;
 	observationsPoolMaxTokens?: number;
 	observationsPoolTargetTokens?: number;
 	showWorkerNotifications?: boolean;
 	passive?: boolean;
 	consolidationInFlight?: boolean;
 	appendEntryReturnsId?: boolean;
-	observer?: StageModelConfig;
-	reflector?: StageModelConfig;
-	dropper?: StageModelConfig;
+	sessionId?: string;
 }) {
 	let entries = [...args.entries];
+	let sessionId = args.sessionId ?? "session-1";
 	const handlers: Record<string, ((event: unknown, ctx: any) => void) | undefined> = {};
 	const pi = {
 		on: vi.fn((eventName: string, cb: (event: unknown, ctx: any) => void) => {
@@ -66,18 +70,17 @@ function setup(args: {
 	let launchedWork: (() => Promise<void>) | undefined;
 	const runtime = {
 		config: {
+			showWorkerNotifications: args.showWorkerNotifications ?? true,
 			passive: args.passive ?? false,
 			debugLog: false,
 			observeAfterTokens: args.observeAfterTokens ?? 1,
 			reflectAfterTokens: args.reflectAfterTokens ?? 1,
+			observerChunkMaxTokens: args.observerChunkMaxTokens,
 			observationsPoolMaxTokens: args.observationsPoolMaxTokens ?? 100,
 			observationsPoolTargetTokens: args.observationsPoolTargetTokens ?? Math.floor((args.observationsPoolMaxTokens ?? 100) / 2),
 			agentMaxTurns: 9,
-			showWorkerNotifications: args.showWorkerNotifications ?? true,
+			agentMaxTokens: 32000,
 			model: { provider: "anthropic", id: "memory", thinking: "minimal" },
-			...(args.observer ? { observer: args.observer } : {}),
-			...(args.reflector ? { reflector: args.reflector } : {}),
-			...(args.dropper ? { dropper: args.dropper } : {}),
 		},
 		consolidationInFlight: args.consolidationInFlight ?? false,
 		consolidationPhase: undefined as "observer" | "reflector" | "dropper" | undefined,
@@ -110,7 +113,10 @@ function setup(args: {
 		ui: { notify: vi.fn() },
 		model: { provider: "session" },
 		modelRegistry: {},
-		sessionManager: { getBranch: () => entries },
+		sessionManager: {
+			getBranch: () => entries,
+			getSessionId: () => sessionId,
+		},
 	};
 	return {
 		pi,
@@ -119,10 +125,12 @@ function setup(args: {
 		fire: (eventName = "turn_end") => handlers[eventName]!(undefined, ctx),
 		fireAgentStart: () => handlers.agent_start!(undefined, ctx),
 		fireTurnEnd: () => handlers.turn_end!(undefined, ctx),
-		runLaunchedWork: async () => {
-			const work = launchedWork;
-			launchedWork = undefined;
-			return work?.();
+		runLaunchedWork: async () => launchedWork?.(),
+		addEntries: (...more: TestEntry[]) => {
+			entries = [...entries, ...more];
+		},
+		setSessionId: (next: string) => {
+			sessionId = next;
 		},
 		getEntries: () => entries,
 	};
@@ -139,93 +147,6 @@ describe("V3 consolidation trigger", () => {
 
 		expect(pi.on).toHaveBeenCalledWith("agent_start", expect.any(Function));
 		expect(pi.on).toHaveBeenCalledWith("turn_end", expect.any(Function));
-	});
-
-	it("waits for in-flight print-mode consolidation on shutdown before the extension context goes stale", async () => {
-		const recorded = observation("cccccccccccc", { sourceEntryIds: ["raw-1"], tokenCount: 4 });
-		let resolveObserver: ((value: unknown) => void) | undefined;
-		mockAgents.runObserver.mockImplementationOnce(() => new Promise((resolve) => {
-			resolveObserver = resolve;
-		}));
-
-		let entries: TestEntry[] = [textCustomMessage("raw-1", "aaaaaaaa")];
-		const handlers: Record<string, ((event: unknown, ctx: any) => unknown) | undefined> = {};
-		const pi = {
-			on: vi.fn((eventName: string, cb: (event: unknown, ctx: any) => unknown) => {
-				handlers[eventName] = cb;
-			}),
-			appendEntry: vi.fn((customType: string, data: unknown) => {
-				entries = [...entries, { type: "custom", id: `appended-${pi.appendEntry.mock.calls.length}`, parentId: entries.at(-1)?.id ?? null, timestamp: "2026-05-02T10:00:00.000Z", customType, data }];
-			}),
-		};
-		const runtime = {
-			config: {
-				passive: false,
-				debugLog: false,
-				observeAfterTokens: 1,
-				reflectAfterTokens: 999,
-				observationsPoolMaxTokens: 100,
-				observationsPoolTargetTokens: 50,
-				agentMaxTurns: 9,
-				model: { provider: "anthropic", id: "memory", thinking: "minimal" },
-			},
-			consolidationInFlight: false,
-			consolidationPromise: null as Promise<void> | null,
-			consolidationPhase: undefined as "observer" | "reflector" | "dropper" | undefined,
-			resolveFailureNotified: false,
-			lastObserverError: undefined as string | undefined,
-			lastReflectorError: undefined as string | undefined,
-			lastDropperError: undefined as string | undefined,
-			ensureConfig: vi.fn(),
-			resolveModel: vi.fn(async () => ({ ok: true, model: { reasoning: true }, apiKey: "key", headers: { h: "v" } })),
-			launchConsolidationTask: vi.fn((_ctx, work) => {
-				runtime.consolidationInFlight = true;
-				const promise = work().finally(() => {
-					runtime.consolidationInFlight = false;
-					runtime.consolidationPromise = null;
-				});
-				runtime.consolidationPromise = promise;
-				return promise;
-			}),
-			recordConsolidationStageError: vi.fn((ctx, phase: "observer" | "reflector" | "dropper", error: unknown) => {
-				const message = error instanceof Error ? error.message : String(error);
-				if (phase === "observer") runtime.lastObserverError = message;
-				if (phase === "reflector") runtime.lastReflectorError = message;
-				if (phase === "dropper") runtime.lastDropperError = message;
-				ctx.ui?.notify(`Observational memory: ${phase} failed: ${message}`, "warning");
-				return message;
-			}),
-		};
-		registerConsolidationTrigger(pi as any, runtime as any);
-
-		const ctx = {
-			mode: "print",
-			cwd: "/tmp/project",
-			hasUI: false,
-			ui: undefined,
-			model: { provider: "session" },
-			modelRegistry: {},
-			sessionManager: { getBranch: () => entries },
-		};
-		handlers.turn_end?.(undefined, ctx);
-		await Promise.resolve();
-		await Promise.resolve();
-		expect(mockAgents.runObserver).toHaveBeenCalled();
-
-		let shutdownSettled = false;
-		const shutdown = Promise.resolve(handlers.session_shutdown?.({ type: "session_shutdown", reason: "quit" }, ctx)).then(() => {
-			shutdownSettled = true;
-		});
-		await Promise.resolve();
-
-		expect(shutdownSettled).toBe(false);
-		expect(pi.appendEntry).not.toHaveBeenCalled();
-
-		resolveObserver?.({ outcome: "recorded", observations: [recorded] });
-		await shutdown;
-
-		expect(pi.appendEntry).toHaveBeenCalledWith(OM_OBSERVATIONS_RECORDED, { observations: [recorded], coversUpToId: "raw-1" });
-		expect(runtime.lastObserverError).toBeUndefined();
 	});
 
 	it("does not launch below all thresholds from either entrypoint", () => {
@@ -297,7 +218,6 @@ describe("V3 consolidation trigger", () => {
 		mockAgents.runObserver.mockResolvedValueOnce({ outcome: "recorded", observations: [obs] });
 		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
 		const { fire, runLaunchedWork, pi, runtime } = setup({ entries, reflectAfterTokens: 999 });
-		runtime.lastObserverError = "stale observer failure";
 
 		fire();
 		await runLaunchedWork();
@@ -309,7 +229,179 @@ describe("V3 consolidation trigger", () => {
 			thinkingLevel: "minimal",
 		}));
 		expect(pi.appendEntry).toHaveBeenCalledWith(OM_OBSERVATIONS_RECORDED, { observations: [obs], coversUpToId: "raw-1" });
-		expect(runtime.lastObserverError).toBeUndefined();
+	});
+
+	it("resolves stage-specific models and thinking through the shared provider path", async () => {
+		const obs = observation("cccccccccccc", { sourceEntryIds: ["raw-1"], tokenCount: 4 });
+		mockAgents.runObserver.mockResolvedValueOnce({ outcome: "recorded", observations: [obs] });
+		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
+		const { fire, runLaunchedWork, runtime } = setup({ entries });
+		(runtime.config as any).observer = {
+			model: { provider: "observer-provider", id: "observer-model" },
+			thinking: "high",
+		};
+		(runtime.config as any).reflector = {
+			model: { provider: "reflector-provider", id: "reflector-model" },
+			thinking: "medium",
+		};
+
+		fire();
+		await runLaunchedWork();
+
+		expect(runtime.resolveModel).toHaveBeenNthCalledWith(1, expect.any(Object), {
+			provider: "observer-provider",
+			id: "observer-model",
+		});
+		expect(runtime.resolveModel).toHaveBeenNthCalledWith(2, expect.any(Object), {
+			provider: "reflector-provider",
+			id: "reflector-model",
+		});
+		expect(mockAgents.runObserver).toHaveBeenCalledWith(expect.objectContaining({ thinkingLevel: "high" }));
+		expect(mockAgents.runReflector).toHaveBeenCalledWith(expect.objectContaining({ thinkingLevel: "medium" }));
+	});
+
+	it("forwards OAuth-shaped auth (headers, no apiKey) to the observer agent", async () => {
+		const obs = observation("cccccccccccc", { sourceEntryIds: ["raw-1"], tokenCount: 4 });
+		mockAgents.runObserver.mockResolvedValueOnce({ outcome: "recorded", observations: [obs] });
+		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
+		const { fire, runLaunchedWork, pi, runtime } = setup({ entries, reflectAfterTokens: 999 });
+		runtime.resolveModel.mockResolvedValueOnce({
+			ok: true,
+			model: { provider: "kimi-coding" },
+			apiKey: undefined,
+			headers: { Authorization: "Bearer oauth-token" },
+		});
+
+		fire();
+		await runLaunchedWork();
+
+		expect(mockAgents.runObserver).toHaveBeenCalledWith(expect.objectContaining({
+			apiKey: undefined,
+			headers: { Authorization: "Bearer oauth-token" },
+		}));
+		expect(pi.appendEntry).toHaveBeenCalledWith(OM_OBSERVATIONS_RECORDED, { observations: [obs], coversUpToId: "raw-1" });
+	});
+
+	it("adds x-opencode-session headers for opencode-go worker models", async () => {
+		const obs = observation("cccccccccccc", { sourceEntryIds: ["raw-1"], tokenCount: 4 });
+		mockAgents.runObserver.mockResolvedValueOnce({ outcome: "recorded", observations: [obs] });
+		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
+		const { fire, runLaunchedWork, pi, runtime } = setup({ entries, reflectAfterTokens: 999, sessionId: "session-abc" });
+		runtime.resolveModel.mockResolvedValueOnce({
+			ok: true,
+			model: { provider: "opencode-go", baseUrl: "https://opencode.ai/zen/go/v1", reasoning: true },
+			apiKey: "go-key",
+		});
+
+		fire();
+		await runLaunchedWork();
+
+		expect(mockAgents.runObserver).toHaveBeenCalledWith(expect.objectContaining({
+			apiKey: "go-key",
+			headers: { "x-opencode-session": "session-abc", "x-opencode-client": "pi" },
+		}));
+		expect(pi.appendEntry).toHaveBeenCalledWith(OM_OBSERVATIONS_RECORDED, { observations: [obs], coversUpToId: "raw-1" });
+	});
+
+	it("merges x-opencode-session with existing auth headers and preserves them", async () => {
+		const obs = observation("cccccccccccc", { sourceEntryIds: ["raw-1"], tokenCount: 4 });
+		mockAgents.runObserver.mockResolvedValueOnce({ outcome: "recorded", observations: [obs] });
+		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
+		const { fire, runLaunchedWork, runtime } = setup({ entries, reflectAfterTokens: 999, sessionId: "session-1" });
+		runtime.resolveModel.mockResolvedValueOnce({
+			ok: true,
+			model: { provider: "opencode-go", baseUrl: "https://opencode.ai/zen/go/v1" },
+			apiKey: "go-key",
+			headers: { Authorization: "Bearer go-key" },
+		});
+
+		fire();
+		await runLaunchedWork();
+
+		expect(mockAgents.runObserver).toHaveBeenCalledWith(expect.objectContaining({
+			headers: {
+				Authorization: "Bearer go-key",
+				"x-opencode-session": "session-1",
+				"x-opencode-client": "pi",
+			},
+		}));
+	});
+
+	it("detects opencode hosts by baseUrl even when provider is generic", async () => {
+		const obs = observation("cccccccccccc", { sourceEntryIds: ["raw-1"], tokenCount: 4 });
+		mockAgents.runObserver.mockResolvedValueOnce({ outcome: "recorded", observations: [obs] });
+		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
+		const { fire, runLaunchedWork, runtime } = setup({ entries, reflectAfterTokens: 999, sessionId: "session-1" });
+		runtime.resolveModel.mockResolvedValueOnce({
+			ok: true,
+			model: { provider: "custom", baseUrl: "https://opencode.ai/zen/go/v1" },
+			apiKey: "go-key",
+		});
+
+		fire();
+		await runLaunchedWork();
+
+		expect(mockAgents.runObserver).toHaveBeenCalledWith(expect.objectContaining({
+			headers: { "x-opencode-session": "session-1", "x-opencode-client": "pi" },
+		}));
+	});
+
+	it("does not send session headers to a hostname that only contains opencode.ai", async () => {
+		const obs = observation("cccccccccccc", { sourceEntryIds: ["raw-1"], tokenCount: 4 });
+		mockAgents.runObserver.mockResolvedValueOnce({ outcome: "recorded", observations: [obs] });
+		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
+		const { fire, runLaunchedWork, runtime } = setup({ entries, reflectAfterTokens: 999, sessionId: "private-session" });
+		runtime.resolveModel.mockResolvedValueOnce({
+			ok: true,
+			model: { provider: "opencode-go", baseUrl: "https://opencode.ai.attacker.example/v1" },
+			apiKey: "custom-key",
+		});
+
+		fire();
+		await runLaunchedWork();
+
+		expect(mockAgents.runObserver).toHaveBeenCalledWith(expect.objectContaining({
+			headers: undefined,
+		}));
+	});
+
+	it("sends session headers to a controlled opencode.ai subdomain", async () => {
+		const obs = observation("cccccccccccc", { sourceEntryIds: ["raw-1"], tokenCount: 4 });
+		mockAgents.runObserver.mockResolvedValueOnce({ outcome: "recorded", observations: [obs] });
+		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
+		const { fire, runLaunchedWork, runtime } = setup({ entries, reflectAfterTokens: 999, sessionId: "session-1" });
+		runtime.resolveModel.mockResolvedValueOnce({
+			ok: true,
+			model: { provider: "custom", baseUrl: "https://api.opencode.ai/v1" },
+			apiKey: "custom-key",
+		});
+
+		fire();
+		await runLaunchedWork();
+
+		expect(mockAgents.runObserver).toHaveBeenCalledWith(expect.objectContaining({
+			headers: { "x-opencode-session": "session-1", "x-opencode-client": "pi" },
+		}));
+	});
+
+	it("leaves headers untouched for non-opencode worker models", async () => {
+		const obs = observation("cccccccccccc", { sourceEntryIds: ["raw-1"], tokenCount: 4 });
+		mockAgents.runObserver.mockResolvedValueOnce({ outcome: "recorded", observations: [obs] });
+		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
+		const { fire, runLaunchedWork, runtime } = setup({ entries, reflectAfterTokens: 999, sessionId: "session-1" });
+		runtime.resolveModel.mockResolvedValueOnce({
+			ok: true,
+			model: { provider: "anthropic", baseUrl: "https://api.anthropic.com" },
+			apiKey: "k",
+		});
+
+		fire();
+		await runLaunchedWork();
+
+		expect(mockAgents.runObserver).toHaveBeenCalledWith(expect.objectContaining({
+			apiKey: "k",
+			headers: undefined,
+		}));
 	});
 
 	it("uses existing observation coverage and retries larger ranges after no-output", async () => {
@@ -331,32 +423,80 @@ describe("V3 consolidation trigger", () => {
 		expect(pi.appendEntry).toHaveBeenCalledWith(OM_OBSERVATIONS_RECORDED, { observations: [newObs], coversUpToId: "raw-3" });
 	});
 
-	it("persists Empty as Observation Coverage without creating an observation batch", async () => {
-		mockAgents.runObserver.mockResolvedValueOnce({ outcome: "empty" });
+	it("observer silence appends nothing and does not fake observation coverage", async () => {
 		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
-		const { fire, runLaunchedWork, pi, ctx, runtime } = setup({ entries });
-		runtime.lastObserverError = "stale observer failure";
+		const { fire, runLaunchedWork, pi } = setup({ entries });
 
 		fire();
 		await runLaunchedWork();
 
-		expect(pi.appendEntry).toHaveBeenCalledWith(OM_OBSERVER_COMPLETED, {
-			outcome: "empty",
-			coversUpToId: "raw-1",
-		});
-		expect(ctx.ui.notify).toHaveBeenCalledWith(
-			"Observational memory: observer found no new observations",
-			"info",
-		);
+		expect(pi.appendEntry).not.toHaveBeenCalled();
 		expect(mockAgents.runReflector).not.toHaveBeenCalled();
 		expect(mockAgents.runDropper).not.toHaveBeenCalled();
-		expect(runtime.lastObserverError).toBeUndefined();
 	});
 
-	it("gates the routine Empty notification", async () => {
+	it("shows routine worker notifications by default", async () => {
+		const newRef = reflection("ffffffffffff", ["aaaaaaaaaaaa"]);
+		mockAgents.runObserver.mockResolvedValueOnce({ outcome: "recorded", observations: [obsA] });
+		mockAgents.runReflector.mockResolvedValueOnce([newRef]);
+		mockAgents.runDropper.mockResolvedValueOnce(["aaaaaaaaaaaa"]);
+		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
+		const { fire, runLaunchedWork, ctx } = setup({ entries, observationsPoolTargetTokens: 5 });
+
+		fire();
+		await runLaunchedWork();
+
+		expect(ctx.ui.notify.mock.calls).toEqual([
+			[expect.stringMatching(/^Observational memory: observer running on ~\d+-token chunk$/), "info"],
+			["Observational memory: 1 observation recorded", "info"],
+			["Observational memory: reflector running (~2 tokens)", "info"],
+			["Observational memory: dropper running after reflection — active observation pool ~19 / 5 target tokens (380%)", "info"],
+		]);
+	});
+
+	it("suppresses routine worker notifications without hiding warnings", async () => {
+		const newRef = reflection("ffffffffffff", ["aaaaaaaaaaaa"]);
+		mockAgents.runObserver.mockResolvedValueOnce({ outcome: "recorded", observations: [obsA] });
+		mockAgents.runReflector.mockResolvedValueOnce([newRef]);
+		mockAgents.runDropper.mockResolvedValueOnce(["aaaaaaaaaaaa"]);
+		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
+		const quiet = setup({ entries, observationsPoolTargetTokens: 5, showWorkerNotifications: false });
+
+		quiet.fire();
+		await quiet.runLaunchedWork();
+
+		expect(mockAgents.runObserver).toHaveBeenCalledOnce();
+		expect(mockAgents.runReflector).toHaveBeenCalledOnce();
+		expect(mockAgents.runDropper).toHaveBeenCalledOnce();
+		expect(quiet.ctx.ui.notify).not.toHaveBeenCalled();
+
+		// Deliberate empty is routine info: also hidden when quiet.
+		mockAgents.runObserver.mockReset();
+		mockAgents.runObserver.mockResolvedValueOnce({ outcome: "empty" });
+		const noOutput = setup({ entries, reflectAfterTokens: 999, showWorkerNotifications: false });
+
+		noOutput.fire();
+		await noOutput.runLaunchedWork();
+
+		expect(noOutput.ctx.ui.notify).not.toHaveBeenCalled();
+
+		// Real failures still surface as warnings when quiet.
+		mockAgents.runObserver.mockReset();
+		mockAgents.runObserver.mockRejectedValueOnce(new ObserverStreamError("error", "prompt is too long"));
+		const failed = setup({ entries, reflectAfterTokens: 999, showWorkerNotifications: false });
+
+		failed.fire();
+		await failed.runLaunchedWork();
+
+		expect(failed.ctx.ui.notify).toHaveBeenCalledOnce();
+		expect(failed.ctx.ui.notify.mock.calls[0][1]).toBe("warning");
+		expect(failed.ctx.ui.notify.mock.calls[0][0]).toContain("observer failed");
+	});
+
+	it("persists explicit Empty as durable scheduling progress", async () => {
 		mockAgents.runObserver.mockResolvedValueOnce({ outcome: "empty" });
 		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
-		const { fire, runLaunchedWork, pi, ctx } = setup({ entries, showWorkerNotifications: false });
+		const { fire, runLaunchedWork, ctx, pi } = setup({ entries, reflectAfterTokens: 999 });
 
 		fire();
 		await runLaunchedWork();
@@ -365,87 +505,74 @@ describe("V3 consolidation trigger", () => {
 			outcome: "empty",
 			coversUpToId: "raw-1",
 		});
-		expect(ctx.ui.notify).not.toHaveBeenCalled();
+		expect(ctx.ui.notify.mock.calls).toEqual([
+			[expect.stringMatching(/^Observational memory: observer running on ~\d+-token chunk$/), "info"],
+			["Observational memory: observer found no new observations", "info"],
+		]);
 	});
 
-	it("does not observe Empty-covered source again in the same or a fresh runtime", async () => {
-		mockAgents.runObserver.mockResolvedValue({ outcome: "empty" });
-		const first = setup({ entries: [textCustomMessage("raw-1", "aaaaaaaa")], reflectAfterTokens: 999 });
+	it("uses durable Empty coverage across runs and resumes after enough new source", async () => {
+		mockAgents.runObserver.mockResolvedValueOnce({ outcome: "empty" });
+		const entries = [textCustomMessage("raw-1", "a".repeat(40))];
+		const { fire, runLaunchedWork, addEntries, runtime } = setup({
+			entries,
+			observeAfterTokens: 10,
+			reflectAfterTokens: 999,
+		});
 
-		first.fire();
-		await first.runLaunchedWork();
-		first.runtime.consolidationInFlight = false;
-		first.fire();
-		await first.runLaunchedWork();
-
-		const fresh = setup({ entries: first.getEntries(), reflectAfterTokens: 999 });
-		fresh.fire();
-		await fresh.runLaunchedWork();
-
+		fire();
+		await runLaunchedWork();
 		expect(mockAgents.runObserver).toHaveBeenCalledTimes(1);
+
+		addEntries(textCustomMessage("raw-2", "b".repeat(20)));
+		runtime.consolidationInFlight = false;
+		fire();
+		expect(runtime.launchConsolidationTask).toHaveBeenCalledTimes(1);
+
+		addEntries(textCustomMessage("raw-3", "c".repeat(40)));
+		runtime.consolidationInFlight = false;
+		mockAgents.runObserver.mockResolvedValueOnce({ outcome: "recorded", observations: [obsA] });
+		fire();
+		await runLaunchedWork();
+		expect(mockAgents.runObserver).toHaveBeenCalledTimes(2);
 	});
 
-	it("keeps silent observer failures uncovered, visible, ungated, and immediately retryable", async () => {
+	it("continues an existing fork session from om.observer.completed coverage", async () => {
+		const entries = [
+			textCustomMessage("raw-1", "a".repeat(40)),
+			observerCompletedEntry("om-empty", { outcome: "empty", coversUpToId: "raw-1" }),
+			textCustomMessage("raw-2", "b".repeat(40)),
+		];
+		const { fire, runLaunchedWork } = setup({
+			entries,
+			observeAfterTokens: 10,
+			reflectAfterTokens: 999,
+		});
+
+		fire();
+		await runLaunchedWork();
+
+		expect(mockAgents.runObserver).toHaveBeenCalledWith(expect.objectContaining({
+			allowedSourceEntryIds: ["raw-2"],
+		}));
+	});
+
+	it("surfaces API stream errors as observer failure, never as empty", async () => {
+		mockAgents.runObserver.mockRejectedValueOnce(new ObserverStreamError("error", "prompt is too long: 5198507 tokens > 1000000 maximum"));
 		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
-		const result = setup({ entries, showWorkerNotifications: false, reflectAfterTokens: 999 });
+		const { fire, runLaunchedWork, pi, runtime, ctx } = setup({ entries, reflectAfterTokens: 999 });
 
-		result.fire();
-		await result.runLaunchedWork();
-		result.runtime.consolidationInFlight = false;
-		result.fire();
-		await result.runLaunchedWork();
+		fire();
+		await runLaunchedWork();
 
-		expect(mockAgents.runObserver).toHaveBeenCalledTimes(2);
-		expect(result.pi.appendEntry).not.toHaveBeenCalled();
-		expect(result.runtime.lastObserverError).toBe("observer reported no structured outcome");
-		expect(result.ctx.ui.notify).toHaveBeenCalledWith(
-			"Observational memory: observer failed: observer reported no structured outcome",
+		expect(runtime.lastObserverError).toContain("prompt is too long");
+		expect(ctx.ui.notify).toHaveBeenCalledWith(
+			'Observational memory: observer failed: observer stream ended with stopReason "error": prompt is too long: 5198507 tokens > 1000000 maximum',
 			"warning",
 		);
+		expect(ctx.ui.notify).not.toHaveBeenCalledWith(expect.stringContaining("no observations"), expect.anything());
+		expect(pi.appendEntry).not.toHaveBeenCalled();
 		expect(mockAgents.runReflector).not.toHaveBeenCalled();
-		expect(mockAgents.runDropper).not.toHaveBeenCalled();
-	});
-
-	it("keeps rejected observer failures uncovered, visible, ungated, and immediately retryable", async () => {
-		mockAgents.runObserver.mockResolvedValue({ outcome: "failed", reason: "rejected_proposals", rejectedCount: 2 });
-		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
-		const result = setup({ entries, showWorkerNotifications: false, reflectAfterTokens: 999 });
-
-		result.fire();
-		await result.runLaunchedWork();
-		result.runtime.consolidationInFlight = false;
-		result.fire();
-		await result.runLaunchedWork();
-
-		expect(mockAgents.runObserver).toHaveBeenCalledTimes(2);
-		expect(result.pi.appendEntry).not.toHaveBeenCalled();
-		expect(result.runtime.lastObserverError).toBe("observer rejected 2 proposals");
-		expect(result.ctx.ui.notify).toHaveBeenCalledWith(
-			"Observational memory: observer failed: observer rejected 2 proposals",
-			"warning",
-		);
-	});
-
-	it("keeps thrown observer failures uncovered, visible, ungated, and immediately retryable", async () => {
-		mockAgents.runObserver.mockRejectedValue(new Error("observe failed"));
-		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
-		const result = setup({ entries, showWorkerNotifications: false, reflectAfterTokens: 999 });
-
-		result.fire();
-		await result.runLaunchedWork();
-		result.runtime.consolidationInFlight = false;
-		result.fire();
-		await result.runLaunchedWork();
-
-		expect(mockAgents.runObserver).toHaveBeenCalledTimes(2);
-		expect(result.pi.appendEntry).not.toHaveBeenCalled();
-		expect(result.runtime.lastObserverError).toBe("observe failed");
-		expect(result.ctx.ui.notify).toHaveBeenCalledWith(
-			"Observational memory: observer failed: observe failed",
-			"warning",
-		);
-		expect(mockAgents.runReflector).not.toHaveBeenCalled();
-		expect(mockAgents.runDropper).not.toHaveBeenCalled();
 	});
 
 	it("model resolution failure skips appending and notifies once", async () => {
@@ -458,71 +585,6 @@ describe("V3 consolidation trigger", () => {
 
 		expect(pi.appendEntry).not.toHaveBeenCalled();
 		expect(ctx.ui.notify).toHaveBeenCalledWith("Observational memory: observer skipped — no model", "warning");
-	});
-
-	it("passes observer and reflector stage thinking overrides to each agent", async () => {
-		mockAgents.runObserver.mockResolvedValueOnce({ outcome: "recorded", observations: [obsA] });
-		const newRef = reflection("ffffffffffff", ["aaaaaaaaaaaa"]);
-		mockAgents.runReflector.mockResolvedValueOnce([newRef]);
-		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
-		const { fire, runLaunchedWork } = setup({
-			entries,
-			observer: { thinking: "off" },
-			reflector: { thinking: "high" },
-		});
-
-		fire();
-		await runLaunchedWork();
-
-		expect(mockAgents.runObserver).toHaveBeenCalledWith(expect.objectContaining({ thinkingLevel: "off" }));
-		expect(mockAgents.runReflector).toHaveBeenCalledWith(expect.objectContaining({ thinkingLevel: "high" }));
-	});
-
-	it("dropper inherits reflector thinking when dropper thinking is unset", async () => {
-		const newRef = reflection("ffffffffffff", ["aaaaaaaaaaaa"]);
-		mockAgents.runReflector.mockResolvedValueOnce([newRef]);
-		mockAgents.runDropper.mockResolvedValueOnce(["aaaaaaaaaaaa"]);
-		const entries = [
-			textCustomMessage("raw-1", "aaaaaaaa"),
-			observationsRecordedEntry("om-obs", { observations: [obsA], coversUpToId: "raw-1" }),
-			textCustomMessage("raw-2", "bbbbbbbb"),
-		];
-		const { fire, runLaunchedWork } = setup({
-			entries,
-			observeAfterTokens: 999,
-			observationsPoolTargetTokens: 5,
-			reflector: { thinking: "high" },
-		});
-
-		fire();
-		await runLaunchedWork();
-
-		expect(mockAgents.runReflector).toHaveBeenCalledWith(expect.objectContaining({ thinkingLevel: "high" }));
-		expect(mockAgents.runDropper).toHaveBeenCalledWith(expect.objectContaining({ thinkingLevel: "high" }));
-	});
-
-	it("dropper own thinking override beats inherited reflector thinking", async () => {
-		const newRef = reflection("ffffffffffff", ["aaaaaaaaaaaa"]);
-		mockAgents.runReflector.mockResolvedValueOnce([newRef]);
-		mockAgents.runDropper.mockResolvedValueOnce(["aaaaaaaaaaaa"]);
-		const entries = [
-			textCustomMessage("raw-1", "aaaaaaaa"),
-			observationsRecordedEntry("om-obs", { observations: [obsA], coversUpToId: "raw-1" }),
-			textCustomMessage("raw-2", "bbbbbbbb"),
-		];
-		const { fire, runLaunchedWork } = setup({
-			entries,
-			observeAfterTokens: 999,
-			observationsPoolTargetTokens: 5,
-			reflector: { thinking: "high" },
-			dropper: { thinking: "medium" },
-		});
-
-		fire();
-		await runLaunchedWork();
-
-		expect(mockAgents.runReflector).toHaveBeenCalledWith(expect.objectContaining({ thinkingLevel: "high" }));
-		expect(mockAgents.runDropper).toHaveBeenCalledWith(expect.objectContaining({ thinkingLevel: "medium" }));
 	});
 
 	it("re-reads branch so observer append can unblock reflector in the same consolidation run", async () => {
@@ -579,28 +641,6 @@ describe("V3 consolidation trigger", () => {
 		expect(mockAgents.runDropper).toHaveBeenCalledWith(expect.objectContaining({ reflections: [newRef], observations: [obsA] }));
 		expect(pi.appendEntry.mock.calls[0]).toEqual([OM_REFLECTIONS_RECORDED, { reflections: [newRef], coversUpToId: "raw-1" }]);
 		expect(pi.appendEntry.mock.calls[1]).toEqual([OM_OBSERVATIONS_DROPPED, { observationIds: ["aaaaaaaaaaaa"], coversUpToId: "raw-1" }]);
-	});
-
-	it("hides routine notifications without disabling the worker pipeline", async () => {
-		const newRef = reflection("ffffffffffff", ["aaaaaaaaaaaa"]);
-		mockAgents.runObserver.mockResolvedValueOnce({ outcome: "recorded", observations: [obsA] });
-		mockAgents.runReflector.mockResolvedValueOnce([newRef]);
-		mockAgents.runDropper.mockResolvedValueOnce(["aaaaaaaaaaaa"]);
-		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
-		const { fire, runLaunchedWork, pi, ctx } = setup({
-			entries,
-			observationsPoolTargetTokens: 5,
-			showWorkerNotifications: false,
-		});
-
-		fire();
-		await runLaunchedWork();
-
-		expect(mockAgents.runObserver).toHaveBeenCalled();
-		expect(mockAgents.runReflector).toHaveBeenCalled();
-		expect(mockAgents.runDropper).toHaveBeenCalled();
-		expect(pi.appendEntry).toHaveBeenCalledTimes(3);
-		expect(ctx.ui.notify).not.toHaveBeenCalled();
 	});
 
 	it("does not launch dropper-only work when active pool is over target", () => {
@@ -779,5 +819,84 @@ describe("V3 consolidation trigger", () => {
 		expect(dropperFailure.runtime.lastDropperError).toBe("drop failed");
 		expect(dropperFailure.pi.appendEntry).toHaveBeenCalledTimes(1);
 		expect(dropperFailure.pi.appendEntry).toHaveBeenCalledWith(OM_REFLECTIONS_RECORDED, { reflections: [newRef], coversUpToId: "raw-1" });
+	});
+});
+
+describe("observer chunk cap", () => {
+	it("caps an oversized backlog and drains it incrementally across runs", async () => {
+		const first = observation("111111111111", { sourceEntryIds: ["raw-1"], tokenCount: 4 });
+		const second = observation("222222222222", { sourceEntryIds: ["raw-2"], tokenCount: 4 });
+		mockAgents.runObserver.mockResolvedValueOnce({ outcome: "recorded", observations: [first] }).mockResolvedValueOnce({ outcome: "recorded", observations: [second] });
+		const entries = [
+			textCustomMessage("raw-1", "a".repeat(800)),
+			textCustomMessage("raw-2", "b".repeat(800)),
+			textCustomMessage("raw-3", "c".repeat(800)),
+		];
+		const { fire, runLaunchedWork, pi, runtime } = setup({ entries, observerChunkMaxTokens: 256, reflectAfterTokens: 999 });
+
+		fire();
+		await runLaunchedWork();
+
+		// Only the oldest entry fits under the cap; coverage advances to it, not to the backlog tail.
+		expect(mockAgents.runObserver).toHaveBeenNthCalledWith(1, expect.objectContaining({ allowedSourceEntryIds: ["raw-1"] }));
+		expect(pi.appendEntry).toHaveBeenNthCalledWith(1, OM_OBSERVATIONS_RECORDED, { observations: [first], coversUpToId: "raw-1" });
+
+		// The next run continues from the advanced coverage.
+		runtime.consolidationInFlight = false;
+		fire();
+		await runLaunchedWork();
+
+		expect(mockAgents.runObserver).toHaveBeenNthCalledWith(2, expect.objectContaining({ allowedSourceEntryIds: ["raw-2"] }));
+		expect(pi.appendEntry).toHaveBeenNthCalledWith(2, OM_OBSERVATIONS_RECORDED, { observations: [second], coversUpToId: "raw-2" });
+	});
+
+	it("does not observe or advance coverage from an oversized entry excerpt", async () => {
+		const hugeText = `HEAD:${"m".repeat(2_000)}:TAIL`;
+		const entries: TestEntry[] = [
+			{
+				type: "message",
+				id: "raw-huge",
+				parentId: null,
+				timestamp: "2026-05-02T10:00:00.000Z",
+				message: {
+					role: "toolResult",
+					toolCallId: "tool-1",
+					toolName: "bash",
+					content: [{ type: "text", text: hugeText }],
+					isError: false,
+					timestamp: Date.parse("2026-05-02T10:00:00.000Z"),
+				},
+			},
+			textCustomMessage("raw-next", "later"),
+		];
+		const { fire, runLaunchedWork, pi } = setup({
+			entries,
+			observerChunkMaxTokens: 100,
+			reflectAfterTokens: 999,
+		});
+
+		fire();
+		await runLaunchedWork();
+
+		expect(mockAgents.runObserver).not.toHaveBeenCalled();
+		expect(pi.appendEntry).not.toHaveBeenCalled();
+	});
+
+	it("derives the cap from the resolved model's context window when not configured", async () => {
+		const obs = observation("444444444444", { sourceEntryIds: ["raw-1"], tokenCount: 4 });
+		mockAgents.runObserver.mockResolvedValueOnce({ outcome: "recorded", observations: [obs] });
+		const entries = [
+			textCustomMessage("raw-1", "a".repeat(800)),
+			textCustomMessage("raw-2", "b".repeat(800)),
+		];
+		const { fire, runLaunchedWork, pi, runtime } = setup({ entries, reflectAfterTokens: 999 });
+		// contextWindow 1,280 -> cap = floor(1,280 * 0.2) = 256, so only raw-1 fits.
+		runtime.resolveModel.mockResolvedValue({ ok: true, model: { reasoning: true, contextWindow: 1_280 }, apiKey: "key", headers: { h: "v" } } as any);
+
+		fire();
+		await runLaunchedWork();
+
+		expect(mockAgents.runObserver).toHaveBeenCalledWith(expect.objectContaining({ allowedSourceEntryIds: ["raw-1"] }));
+		expect(pi.appendEntry).toHaveBeenCalledWith(OM_OBSERVATIONS_RECORDED, expect.objectContaining({ coversUpToId: "raw-1" }));
 	});
 });

@@ -1,19 +1,21 @@
 import { agentLoop, type AgentContext, type AgentLoopConfig, type AgentTool } from "@earendil-works/pi-agent-core";
 import type { Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { Type } from "@earendil-works/pi-ai";
-import { streamSimple } from "@earendil-works/pi-ai/compat";
 import type { Static } from "typebox";
 import { hashId } from "../../ids.js";
+import { logAgentStreamError } from "../stream-errors.js";
+import { resolveWorkerStreamSimple, type StreamableModelRegistry, type WorkerStreamSimple } from "../worker-stream.js";
 import { AGENT_LOOP_MAX_TOKENS, boundedMaxTokens } from "../../model-budget.js";
 import { OBSERVER_SYSTEM } from "./prompts.js";
 import { nowTimestamp, truncateRecordContent } from "../../serialize.js";
 import type { Observation, Relevance } from "../../session-ledger/index.js";
-import { estimateStringTokens } from "../../tokens.js";
+import { observationLineTokenCount } from "../../tokens.js";
 
 interface RunObserverArgs {
 	model: Model<any>;
 	apiKey?: string;
 	headers?: Record<string, string>;
+	env?: Record<string, string>;
 	priorReflections: string[];
 	priorObservations: string[];
 	chunk: string;
@@ -21,7 +23,11 @@ interface RunObserverArgs {
 	signal?: AbortSignal;
 	agentLoop?: typeof agentLoop;
 	maxTurns?: number;
+	/** Maximum output tokens for the loop (defaults to {@link AGENT_LOOP_MAX_TOKENS}). */
+	maxOutputTokens?: number;
 	thinkingLevel?: ModelThinkingLevel;
+	modelRegistry?: StreamableModelRegistry;
+	streamSimple?: WorkerStreamSimple;
 }
 
 const RelevanceSchema = Type.Union([
@@ -33,7 +39,7 @@ const RelevanceSchema = Type.Union([
 
 export const OBSERVATION_TIMESTAMP_PATTERN = "^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}$";
 
-/** The structured result of a completed observer run. */
+/** Structured result of one observer protocol run. */
 export type ObserverOutcome =
 	| { outcome: "recorded"; observations: Observation[] }
 	| { outcome: "empty" }
@@ -68,6 +74,21 @@ const RecordObservationsSchema = Type.Object({
 
 type RecordObservationsArgs = Static<typeof RecordObservationsSchema>;
 
+/**
+ * Thrown when the agent loop ends with an API/stream failure (`stopReason`
+ * `"error"`/`"aborted"`) without recording anything. agent-core returns such
+ * runs normally, so without this the caller cannot tell a hard failure from a
+ * deliberate empty result (#32).
+ */
+export class ObserverStreamError extends Error {
+	readonly stopReason: string;
+	constructor(stopReason: string, errorMessage?: string) {
+		super(`observer stream ended with stopReason "${stopReason}"${errorMessage ? `: ${errorMessage}` : ""}`);
+		this.name = "ObserverStreamError";
+		this.stopReason = stopReason;
+	}
+}
+
 function joinOrEmpty(items: string[]): string {
 	return items.length ? items.join("\n") : "(none yet)";
 }
@@ -89,19 +110,19 @@ export function normalizeSourceEntryIds(
 	return Array.from(seen).sort((a, b) => (allowedOrder.get(a) ?? 0) - (allowedOrder.get(b) ?? 0));
 }
 
-/** Runs the observer and classifies its structured protocol outcome. */
-export async function runObserver(args: RunObserverArgs): Promise<ObserverOutcome> {
-	const { model, apiKey, headers, priorReflections, priorObservations, chunk, allowedSourceEntryIds, signal } = args;
-	const conversation = chunk.trim();
-	if (!conversation) {
-		return { outcome: "failed", reason: "no_structured_outcome" };
-	}
+interface ObserverCollectionState {
+	accumulated: Map<string, Observation>;
+	rejectedCount: number;
+	explicitlyEmpty: boolean;
+}
 
-	const accumulated = new Map<string, Observation>();
-	let rejectedCount = 0;
-	let explicitlyEmpty = false;
+type ObserverTerminalStreamError = { stopReason: string; errorMessage?: string };
 
-	const recordObservations: AgentTool<typeof RecordObservationsSchema> = {
+function createRecordObservationsTool(
+	state: ObserverCollectionState,
+	allowedSourceEntryIds: readonly string[],
+): AgentTool<typeof RecordObservationsSchema> {
+	return {
 		name: "record_observations",
 		label: "Record observations",
 		description:
@@ -113,9 +134,7 @@ export async function runObserver(args: RunObserverArgs): Promise<ObserverOutcom
 			let added = 0;
 			let duplicates = 0;
 			let rejected = 0;
-			if (params.observations.length === 0) {
-				explicitlyEmpty = true;
-			}
+			if (params.observations.length === 0) state.explicitlyEmpty = true;
 			for (const obs of params.observations) {
 				const sourceEntryIds = normalizeSourceEntryIds(obs.sourceEntryIds, allowedSourceEntryIds);
 				if (!sourceEntryIds) {
@@ -124,21 +143,26 @@ export async function runObserver(args: RunObserverArgs): Promise<ObserverOutcom
 				}
 				const content = truncateRecordContent(obs.content);
 				const id = hashId(content);
-				if (accumulated.has(id)) {
+				if (state.accumulated.has(id)) {
 					duplicates++;
 					continue;
 				}
-				accumulated.set(id, {
+				state.accumulated.set(id, {
 					id,
 					content,
 					timestamp: obs.timestamp,
 					relevance: obs.relevance as Relevance,
 					sourceEntryIds,
-					tokenCount: estimateStringTokens(content),
+					tokenCount: observationLineTokenCount({
+						id,
+						timestamp: obs.timestamp,
+						relevance: obs.relevance,
+						content,
+					}),
 				});
 				added++;
 			}
-			rejectedCount += rejected;
+			state.rejectedCount += rejected;
 			const rejectedPart = rejected > 0
 				? ` ${rejected} observation${rejected === 1 ? "" : "s"} rejected for missing or invalid sourceEntryIds.`
 				: "";
@@ -146,11 +170,40 @@ export async function runObserver(args: RunObserverArgs): Promise<ObserverOutcom
 				`Recorded ${added} new observation${added === 1 ? "" : "s"} ` +
 				(duplicates > 0 ? `(${duplicates} duplicate${duplicates === 1 ? "" : "s"} skipped).` : ".") +
 				rejectedPart +
-				` Total so far this run: ${accumulated.size}. ` +
+				` Total so far this run: ${state.accumulated.size}. ` +
 				`Continue if the chunk still has uncovered content; otherwise stop calling the tool and emit a short plain-text confirmation.`;
-			return { content: [{ type: "text", text: ack }], details: { added, duplicates, rejected, total: accumulated.size } };
+			return { content: [{ type: "text", text: ack }], details: { added, duplicates, rejected, total: state.accumulated.size } };
 		},
 	};
+}
+
+function observerOutcome(
+	state: ObserverCollectionState,
+	streamError: ObserverTerminalStreamError | undefined,
+): ObserverOutcome {
+	if (state.accumulated.size > 0) {
+		return { outcome: "recorded", observations: Array.from(state.accumulated.values()) };
+	}
+	if (streamError) throw new ObserverStreamError(streamError.stopReason, streamError.errorMessage);
+	if (state.rejectedCount > 0) {
+		return { outcome: "failed", reason: "rejected_proposals", rejectedCount: state.rejectedCount };
+	}
+	if (state.explicitlyEmpty) return { outcome: "empty" };
+	return { outcome: "failed", reason: "no_structured_outcome" };
+}
+
+/** Runs the observer and distinguishes Recorded, explicit Empty, and failed protocol outcomes. */
+export async function runObserver(args: RunObserverArgs): Promise<ObserverOutcome> {
+	const { model, apiKey, headers, env, priorReflections, priorObservations, chunk, allowedSourceEntryIds, signal } = args;
+	const conversation = chunk.trim();
+	if (!conversation) return { outcome: "failed", reason: "no_structured_outcome" };
+
+	const state: ObserverCollectionState = {
+		accumulated: new Map<string, Observation>(),
+		rejectedCount: 0,
+		explicitlyEmpty: false,
+	};
+	const recordObservations = createRecordObservationsTool(state, allowedSourceEntryIds);
 
 	const now = nowTimestamp();
 	const userText = `Current local time: ${now}
@@ -188,7 +241,8 @@ ${conversation}`;
 		model,
 		apiKey,
 		headers,
-		maxTokens: boundedMaxTokens(model, AGENT_LOOP_MAX_TOKENS),
+		env,
+		maxTokens: boundedMaxTokens(model, args.maxOutputTokens ?? AGENT_LOOP_MAX_TOKENS),
 		convertToLlm: (msgs) => msgs as Message[],
 		toolExecution: "sequential",
 		...(reasoning && thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {}),
@@ -203,20 +257,25 @@ ${conversation}`;
 	};
 
 	const loop = args.agentLoop ?? agentLoop;
-	const stream = loop(prompts, context, config, signal, streamSimple);
-	for await (const _event of stream) {
+	const stream = loop(
+		prompts,
+		context,
+		config,
+		signal,
+		resolveWorkerStreamSimple(model, args.modelRegistry, args.streamSimple),
+	);
+	let streamError: ObserverTerminalStreamError | undefined;
+	for await (const event of stream) {
 		// Drain events; the tool's execute already collects records.
+		logAgentStreamError("observer", event);
+		// Watch for a terminal API/stream failure so it is not conflated with
+		// a deliberate empty result.
+		const message = (event as { message?: { role?: string; stopReason?: string; errorMessage?: string } }).message;
+		if (message?.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted")) {
+			streamError = { stopReason: message.stopReason, errorMessage: message.errorMessage };
+		}
 	}
 	await stream.result();
 
-	if (accumulated.size > 0) {
-		return { outcome: "recorded", observations: Array.from(accumulated.values()) };
-	}
-	if (rejectedCount > 0) {
-		return { outcome: "failed", reason: "rejected_proposals", rejectedCount };
-	}
-	if (explicitlyEmpty) {
-		return { outcome: "empty" };
-	}
-	return { outcome: "failed", reason: "no_structured_outcome" };
+	return observerOutcome(state, streamError);
 }

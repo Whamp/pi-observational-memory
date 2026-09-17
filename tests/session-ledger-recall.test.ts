@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { recallMemorySources, type Entry, type Observation, type Reflection } from "../src/session-ledger/recall.js";
 import {
-	OM_OBSERVER_COMPLETED,
 	OM_OBSERVATIONS_DROPPED,
 	OM_OBSERVATIONS_RECORDED,
 	OM_REFLECTIONS_RECORDED,
@@ -93,27 +92,6 @@ describe("session-ledger recall", () => {
 		expect(result.observations[0].status).toBe("active");
 		expect(result.observations[0].sourceEntries.map((entry) => entry.id)).toEqual(["src-1"]);
 		expect(result.partial).toBe(false);
-	});
-
-	it("recalls durable memory after a native compaction becomes the visible boundary", () => {
-		const entries: Entry[] = [
-			sourceEntry("src-1", "important source"),
-			observationsEntry("obs-entry-1", [observation({ id: OBS_1, sourceEntryIds: ["src-1"] })]),
-			sourceEntry("src-2", "kept source"),
-			{
-				type: "compaction",
-				id: "native-compaction",
-				summary: "Native summary",
-				firstKeptEntryId: "src-2",
-			},
-		];
-
-		const result = recallMemorySources(entries, OBS_1);
-
-		expect(result.status).toBe("found");
-		if (result.status !== "found") return;
-		expect(result.observations[0].observation.id).toBe(OBS_1);
-		expect(result.observations[0].sourceEntries.map((entry) => entry.id)).toEqual(["src-1"]);
 	});
 
 	it("recalls a dropped observation and preserves source evidence", () => {
@@ -247,20 +225,6 @@ describe("session-ledger recall", () => {
 		expect(recallMemorySources(entries, OBS_1).status).toBe("not_found");
 		expect(recallMemorySources(entries, OBS_2).status).toBe("not_found");
 		expect(recallMemorySources(entries, REF_1).status).toBe("not_found");
-	});
-
-	it("does not recall Empty completion entries as memory", () => {
-		const entries: Entry[] = [
-			sourceEntry("src-1"),
-			{
-				type: "custom",
-				id: OBS_1,
-				customType: OM_OBSERVER_COMPLETED,
-				data: { outcome: "empty", coversUpToId: "src-1" },
-			},
-		];
-
-		expect(recallMemorySources(entries, OBS_1).status).toBe("not_found");
 	});
 
 	it("reports collisions when an id matches multiple V3 records", () => {

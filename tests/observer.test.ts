@@ -1,13 +1,12 @@
-import { streamSimple } from "@earendil-works/pi-ai/compat";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
-import { normalizeSourceEntryIds, OBSERVATION_TIMESTAMP_PATTERN, runObserver } from "../src/agents/observer/agent.js";
-import { estimateStringTokens } from "../src/tokens.js";
+import { normalizeSourceEntryIds, OBSERVATION_TIMESTAMP_PATTERN, ObserverStreamError, runObserver } from "../src/agents/observer/agent.js";
+import { AGENT_LOOP_MAX_TOKENS } from "../src/model-budget.js";
 
-function fakeAgentLoop(handler: (prompts: any[], context: any, config: any) => Promise<void> | void): any {
+function fakeAgentLoop(handler: (prompts: any[], context: any, config: any) => Promise<void> | void, events: any[] = []): any {
 	return ((prompts: any[], context: any, config: any) => ({
 		async *[Symbol.asyncIterator]() {
-			// No streaming events needed for these tests.
+			for (const event of events) yield event;
 		},
 		result: async () => {
 			await handler(prompts, context, config);
@@ -15,6 +14,62 @@ function fakeAgentLoop(handler: (prompts: any[], context: any, config: any) => P
 		},
 	})) as any;
 }
+
+function assistantEndEvent(stopReason: string, errorMessage?: string): any {
+	return { type: "message_end", message: { role: "assistant", stopReason, errorMessage } };
+}
+
+describe("runObserver maxTokens clamping", () => {
+	function captureLoopConfig() {
+		let loopConfig: any;
+		const loop = fakeAgentLoop((_prompts, _context, config) => {
+			loopConfig = config;
+		});
+		return { loop, config: () => loopConfig };
+	}
+
+	const args = {
+		apiKey: "test",
+		priorReflections: [],
+		priorObservations: [],
+		chunk: "[Source entry id: entry-a]\nUser asked for a memory update.",
+		allowedSourceEntryIds: ["entry-a"],
+	};
+
+	it("clamps the loop maxTokens to a model whose maxTokens is below the configured budget", async () => {
+		const { loop, config } = captureLoopConfig();
+
+		await runObserver({
+			...args,
+			model: { maxTokens: 8_192 } as any,
+			maxOutputTokens: 32_000,
+			agentLoop: loop,
+		});
+
+		expect(config().maxTokens).toBe(8_192);
+	});
+
+	it("passes the configured maxOutputTokens through when the model advertises no maxTokens", async () => {
+		const { loop, config } = captureLoopConfig();
+
+		await runObserver({
+			...args,
+			model: {} as any,
+			maxOutputTokens: 8_192,
+			agentLoop: loop,
+		});
+
+		expect(config().maxTokens).toBe(8_192);
+	});
+
+	it("defaults the loop maxTokens to AGENT_LOOP_MAX_TOKENS", async () => {
+		const { loop, config } = captureLoopConfig();
+
+		await runObserver({ ...args, model: {} as any, agentLoop: loop });
+
+		expect(config().maxTokens).toBe(AGENT_LOOP_MAX_TOKENS);
+	});
+});
 
 describe("OBSERVATION_TIMESTAMP_PATTERN", () => {
 	it("matches local minute timestamps without regex shorthand escapes", () => {
@@ -39,10 +94,8 @@ describe("runObserver", () => {
 
 	it("keeps core observer prompt rules", async () => {
 		let systemPrompt = "";
-		let userPrompt = "";
-		const loop = fakeAgentLoop((prompts, context) => {
+		const loop = fakeAgentLoop((_prompts, context) => {
 			systemPrompt = context.systemPrompt;
-			userPrompt = prompts[0].content[0].text;
 		});
 
 		await runObserver({ ...baseArgs, agentLoop: loop });
@@ -51,32 +104,11 @@ describe("runObserver", () => {
 		expect(systemPrompt).toContain("Detail preservation");
 		expect(systemPrompt).toContain("Frame state changes as supersession");
 		expect(systemPrompt).toContain("sourceEntryIds");
-		expect(systemPrompt).toContain("empty observations array");
-		expect(systemPrompt).toContain("plain-text confirmation alone is a failed outcome");
-		expect(systemPrompt).not.toContain("simply do not call the tool");
+		expect(systemPrompt).toContain("zero observations");
 		expect(systemPrompt).toContain("The dropper will drop these first");
 		expect(systemPrompt).toContain("highest-resistance, load-bearing observations");
 		expect(systemPrompt).not.toContain("will NEVER be dropped");
 		expect(systemPrompt).not.toContain("pruner");
-		expect(userPrompt).toContain("explicitly call record_observations with an empty observations array");
-	});
-
-	it("passes Pi's standard stream function to the agent loop", async () => {
-		const loop = vi.fn(fakeAgentLoop(() => {}));
-
-		await runObserver({ ...baseArgs, agentLoop: loop });
-
-		expect(loop).toHaveBeenCalledWith(expect.any(Array), expect.any(Object), expect.any(Object), undefined, streamSimple);
-	});
-
-	it("reports Empty only after an explicit empty observations submission", async () => {
-		const loop = fakeAgentLoop(async (_prompts, context) => {
-			await context.tools[0].execute("tool-1", { observations: [] });
-		});
-
-		await expect(runObserver({ ...baseArgs, agentLoop: loop })).resolves.toEqual({
-			outcome: "empty",
-		});
 	});
 
 	it("records V3 observations with source ids and code-computed tokenCount", async () => {
@@ -90,59 +122,23 @@ describe("runObserver", () => {
 		const result = await runObserver({ ...baseArgs, agentLoop: loop });
 
 		expect(result.outcome).toBe("recorded");
-		if (result.outcome !== "recorded") {
-			return;
-		}
+		if (result.outcome !== "recorded") throw new Error("expected recorded observer outcome");
 		expect(result.observations).toHaveLength(1);
 		expect(result.observations[0]).toMatchObject({
 			content,
 			timestamp: "2026-05-02 10:30",
 			relevance: "high",
 			sourceEntryIds: ["entry-a"],
-			tokenCount: estimateStringTokens(content),
+			// tokenCount is code-computed from the full rendered line (id + timestamp + relevance + content).
+			tokenCount: 18,
 		});
 		expect(result.observations[0].id).toMatch(/^[a-f0-9]{12}$/);
 	});
 
-	it("reports Failed when every proposed observation is rejected", async () => {
+	it("rejects invented source ids and returns no observations", async () => {
 		const loop = fakeAgentLoop(async (_prompts, context) => {
 			await context.tools[0].execute("tool-1", {
 				observations: [{ timestamp: "2026-05-02 10:30", content: "Bad source", relevance: "medium", sourceEntryIds: ["missing"] }],
-			});
-		});
-
-		await expect(runObserver({ ...baseArgs, agentLoop: loop })).resolves.toEqual({
-			outcome: "failed",
-			reason: "rejected_proposals",
-			rejectedCount: 1,
-		});
-	});
-
-	it("reports Recorded when empty, accepted, and rejected proposals occur in the same run", async () => {
-		const loop = fakeAgentLoop(async (_prompts, context) => {
-			await context.tools[0].execute("tool-empty", { observations: [] });
-			await context.tools[0].execute("tool-1", {
-				observations: [
-					{ timestamp: "2026-05-02 10:30", content: "Accepted", relevance: "high", sourceEntryIds: ["entry-a"] },
-					{ timestamp: "2026-05-02 10:31", content: "Rejected", relevance: "medium", sourceEntryIds: ["missing"] },
-				],
-			});
-		});
-
-		const result = await runObserver({ ...baseArgs, agentLoop: loop });
-
-		expect(result.outcome).toBe("recorded");
-		if (result.outcome !== "recorded") {
-			return;
-		}
-		expect(result.observations.map((item) => item.content)).toEqual(["Accepted"]);
-	});
-
-	it("reports Failed when an explicit empty submission is followed by a rejection", async () => {
-		const loop = fakeAgentLoop(async (_prompts, context) => {
-			await context.tools[0].execute("tool-1", { observations: [] });
-			await context.tools[0].execute("tool-2", {
-				observations: [{ timestamp: "2026-05-02 10:30", content: "Rejected", relevance: "medium", sourceEntryIds: ["missing"] }],
 			});
 		});
 
@@ -166,14 +162,12 @@ describe("runObserver", () => {
 		const result = await runObserver({ ...baseArgs, agentLoop: loop });
 
 		expect(result.outcome).toBe("recorded");
-		if (result.outcome !== "recorded") {
-			return;
-		}
+		if (result.outcome !== "recorded") throw new Error("expected recorded observer outcome");
 		expect(result.observations).toHaveLength(1);
 		expect(result.observations[0].content).toBe("Same content");
 	});
 
-	it("reports Failed when no structured outcome is submitted", async () => {
+	it("requires an explicit Empty tool result instead of treating silence as progress", async () => {
 		const loop = fakeAgentLoop(() => {});
 		await expect(runObserver({ ...baseArgs, agentLoop: loop })).resolves.toEqual({
 			outcome: "failed",
@@ -181,14 +175,37 @@ describe("runObserver", () => {
 		});
 	});
 
-	it("reports Failed for a blank chunk without invoking the agent loop", async () => {
-		const loop = vi.fn(fakeAgentLoop(() => {}));
-
-		await expect(runObserver({ ...baseArgs, chunk: "   ", agentLoop: loop })).resolves.toEqual({
-			outcome: "failed",
-			reason: "no_structured_outcome",
+	it("returns Empty only after an explicit empty tool call", async () => {
+		const loop = fakeAgentLoop(async (_prompts, context) => {
+			await context.tools[0].execute("tool-1", { observations: [] });
 		});
-		expect(loop).not.toHaveBeenCalled();
+
+		await expect(runObserver({ ...baseArgs, agentLoop: loop })).resolves.toEqual({ outcome: "empty" });
+	});
+
+	it("throws ObserverStreamError when the stream errors with nothing recorded", async () => {
+		for (const stopReason of ["error", "aborted"]) {
+			const loop = fakeAgentLoop(() => {}, [assistantEndEvent(stopReason, "prompt is too long")]);
+			const error = await runObserver({ ...baseArgs, agentLoop: loop }).catch((e) => e);
+			expect(error).toBeInstanceOf(ObserverStreamError);
+			expect(error.stopReason).toBe(stopReason);
+			expect(error.message).toContain("prompt is too long");
+		}
+	});
+
+	it("keeps partial observations when the stream errors after recording", async () => {
+		const loop = fakeAgentLoop(async (_prompts, context) => {
+			await context.tools[0].execute("tool-1", {
+				observations: [{ timestamp: "2026-05-02 10:30", content: "Kept despite later error", relevance: "high", sourceEntryIds: ["entry-a"] }],
+			});
+		}, [assistantEndEvent("error", "gateway timeout")]);
+
+		const result = await runObserver({ ...baseArgs, agentLoop: loop });
+
+		expect(result.outcome).toBe("recorded");
+		if (result.outcome !== "recorded") throw new Error("expected recorded observer outcome");
+		expect(result.observations).toHaveLength(1);
+		expect(result.observations[0].content).toBe("Kept despite later error");
 	});
 
 	it("uses maxTurns as an observer turn cap", async () => {

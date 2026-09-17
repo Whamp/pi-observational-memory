@@ -1,4 +1,5 @@
 import type { Message, TextContent, ToolResultMessage } from "@earendil-works/pi-ai";
+import { estimateStringTokens } from "./tokens.js";
 
 function pad(n: number): string {
 	return n.toString().padStart(2, "0");
@@ -102,14 +103,13 @@ export const MAX_RECORD_CONTENT_CHARS = 10_000;
 
 export function truncateRecordContent(content: string): string {
 	if (content.length <= MAX_RECORD_CONTENT_CHARS) return content;
-
-	let headLength = MAX_RECORD_CONTENT_CHARS;
+	let dropped = content.length - MAX_RECORD_CONTENT_CHARS;
 	while (true) {
-		const dropped = content.length - headLength;
 		const suffix = ` … [truncated ${dropped} chars]`;
-		const nextHeadLength = Math.max(0, MAX_RECORD_CONTENT_CHARS - suffix.length);
-		if (nextHeadLength === headLength) return `${content.slice(0, headLength)}${suffix}`;
-		headLength = nextHeadLength;
+		const headLength = Math.max(0, MAX_RECORD_CONTENT_CHARS - suffix.length);
+		const nextDropped = content.length - headLength;
+		if (nextDropped === dropped) return `${content.slice(0, headLength)}${suffix}`;
+		dropped = nextDropped;
 	}
 }
 
@@ -166,23 +166,52 @@ export function serializeBranchEntries(entries: RenderableEntry[]): string {
 export type SourceAddressedSerialization = {
 	text: string;
 	sourceEntryIds: string[];
+	estimatedTokens: number;
+	truncatedSourceEntryIds: string[];
+};
+
+export type SourceAddressedSerializationOptions = {
+	/** Maximum estimated tokens in the final source-addressed text. */
+	maxTokens?: number;
 };
 
 function isSourceRenderableEntry(entry: RenderableEntry): boolean {
 	return entry.type === "message" || entry.type === "custom_message" || entry.type === "branch_summary";
 }
 
-export function serializeSourceAddressedBranchEntries(entries: RenderableEntry[]): SourceAddressedSerialization {
+/**
+ * Serializes only complete source entries that fit the input budget. An
+ * oversized first entry yields no source because an excerpt cannot establish
+ * full-source observation coverage.
+ */
+export function serializeSourceAddressedBranchEntries(
+	entries: RenderableEntry[],
+	options: SourceAddressedSerializationOptions = {},
+): SourceAddressedSerialization {
 	const blocks: string[] = [];
 	const sourceEntryIds: string[] = [];
+	const truncatedSourceEntryIds: string[] = [];
+	let estimatedTokens = 0;
+
 	for (const entry of entries) {
 		if (!entry.id || !isSourceRenderableEntry(entry)) continue;
 		const rendered = serializeBranchEntries([entry]);
 		if (!rendered.trim()) continue;
+		const label = `[Source entry id: ${entry.id}]`;
+		const block = `${label}\n${rendered}`;
+		const separator = blocks.length > 0 ? "\n\n" : "";
+		const blockTokens = estimateStringTokens(`${separator}${block}`);
+		const maxTokens = options.maxTokens;
+
+		if (maxTokens !== undefined && estimatedTokens + blockTokens > maxTokens) break;
+
+		blocks.push(block);
 		sourceEntryIds.push(entry.id);
-		blocks.push(`[Source entry id: ${entry.id}]\n${rendered}`);
+		estimatedTokens += blockTokens;
 	}
-	return { text: blocks.join("\n\n"), sourceEntryIds };
+
+	const text = blocks.join("\n\n");
+	return { text, sourceEntryIds, estimatedTokens: estimateStringTokens(text), truncatedSourceEntryIds };
 }
 
 function renderRecallMessage(entry: RenderableEntry): string | null {

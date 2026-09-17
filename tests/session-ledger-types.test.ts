@@ -24,8 +24,8 @@ import {
 } from "../src/session-ledger/index.js";
 import {
 	memoryDetails,
-	observation,
 	observerCompletedEntry,
+	observation,
 	observationsDroppedEntry,
 	observationsRecordedEntry,
 	oldV2CompactionDetails,
@@ -36,22 +36,11 @@ import {
 
 describe("session-ledger V3 type guards and builders", () => {
 	it("exports the V3 custom type constants", () => {
+		expect(OM_OBSERVER_COMPLETED).toBe("om.observer.completed");
 		expect(OM_OBSERVATIONS_RECORDED).toBe("om.observations.recorded");
 		expect(OM_REFLECTIONS_RECORDED).toBe("om.reflections.recorded");
 		expect(OM_OBSERVATIONS_DROPPED).toBe("om.observations.dropped");
 		expect(OM_FOLDED).toBe("om.folded");
-	});
-
-	it("validates and builds explicit Empty observer completion entries", () => {
-		const data = { outcome: "empty", coversUpToId: "raw-1" };
-
-		expect(OM_OBSERVER_COMPLETED).toBe("om.observer.completed");
-		expect(isObserverCompletedData(data)).toBe(true);
-		expect(isObserverCompletedData({ ...data, outcome: "recorded" })).toBe(false);
-		expect(isObserverCompletedData({ ...data, coversUpToId: "" })).toBe(false);
-		expect(buildObserverCompletedData("raw-1")).toEqual(data);
-		expect(buildObserverCompletedData("")).toBeUndefined();
-		expect(isObserverCompletedEntry(observerCompletedEntry("om-empty-1", data))).toBe(true);
 	});
 
 	it("accepts valid V3 observation records and rejects observations without source ids", () => {
@@ -65,6 +54,17 @@ describe("session-ledger V3 type guards and builders", () => {
 		expect(isReflection(reflection("eeeeeeeeeeee", ["aaaaaaaaaaaa"]))).toBe(true);
 		expect(isReflection({ ...reflection("ffffffffffff"), supportingObservationIds: undefined })).toBe(false);
 		expect(isReflection({ ...reflection("111111111111"), tokenCount: undefined })).toBe(false);
+	});
+
+	it("accepts only explicit Empty observer completion data", () => {
+		expect(isObserverCompletedData({ outcome: "empty", coversUpToId: "raw-1" })).toBe(true);
+		expect(isObserverCompletedData({ outcome: "recorded", coversUpToId: "raw-1" })).toBe(false);
+		expect(buildObserverCompletedData("raw-1")).toEqual({ outcome: "empty", coversUpToId: "raw-1" });
+		expect(buildObserverCompletedData("")).toBeUndefined();
+		expect(isObserverCompletedEntry(observerCompletedEntry("om-empty", {
+			outcome: "empty",
+			coversUpToId: "raw-1",
+		}))).toBe(true);
 	});
 
 	it("accepts non-empty V3 ledger entry data", () => {

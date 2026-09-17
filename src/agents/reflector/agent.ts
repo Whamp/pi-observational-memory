@@ -1,10 +1,11 @@
 import { agentLoop, type AgentContext, type AgentLoopConfig, type AgentTool } from "@earendil-works/pi-agent-core";
 import type { Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { Type } from "@earendil-works/pi-ai";
-import { streamSimple } from "@earendil-works/pi-ai/compat";
 import type { Static } from "typebox";
 import { debugLog } from "../../debug-log.js";
 import { hashId } from "../../ids.js";
+import { logAgentStreamError } from "../stream-errors.js";
+import { resolveWorkerStreamSimple, type StreamableModelRegistry, type WorkerStreamSimple } from "../worker-stream.js";
 import { AGENT_LOOP_MAX_TOKENS, boundedMaxTokens } from "../../model-budget.js";
 import { truncateRecordContent } from "../../serialize.js";
 import { REFLECTOR_SYSTEM } from "./prompts.js";
@@ -22,12 +23,17 @@ interface RunReflectorArgs {
 	model: Model<any>;
 	apiKey?: string;
 	headers?: Record<string, string>;
+	env?: Record<string, string>;
 	reflections: Reflection[];
 	observations: Observation[];
 	signal?: AbortSignal;
 	agentLoop?: typeof agentLoop;
 	maxTurns?: number;
+	/** Maximum output tokens for the loop (defaults to {@link AGENT_LOOP_MAX_TOKENS}). */
+	maxOutputTokens?: number;
 	thinkingLevel?: ModelThinkingLevel;
+	modelRegistry?: StreamableModelRegistry;
+	streamSimple?: WorkerStreamSimple;
 }
 
 const RecordReflectionsSchema = Type.Object({
@@ -104,7 +110,7 @@ function normalizeReflectionContent(content: string): string | undefined {
 }
 
 export async function runReflector(args: RunReflectorArgs): Promise<Reflection[] | undefined> {
-	const { model, apiKey, headers, reflections, observations, signal } = args;
+	const { model, apiKey, headers, env, reflections, observations, signal } = args;
 	if (observations.length === 0) return undefined;
 
 	const coverageById = reflectionCoverageMap(observations, reflections);
@@ -175,7 +181,8 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
 		model,
 		apiKey,
 		headers,
-		maxTokens: boundedMaxTokens(model, AGENT_LOOP_MAX_TOKENS),
+		env,
+		maxTokens: boundedMaxTokens(model, args.maxOutputTokens ?? AGENT_LOOP_MAX_TOKENS),
 		convertToLlm: (msgs) => msgs as Message[],
 		toolExecution: "sequential",
 		...(reasoning && thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {}),
@@ -183,9 +190,16 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
 	};
 
 	const loop = args.agentLoop ?? agentLoop;
-	const stream = loop(prompts, context, config, signal, streamSimple);
-	for await (const _event of stream) {
+	const stream = loop(
+		prompts,
+		context,
+		config,
+		signal,
+		resolveWorkerStreamSimple(model, args.modelRegistry, args.streamSimple),
+	);
+	for await (const event of stream) {
 		// Tool execution collects records.
+		logAgentStreamError("reflector", event);
 	}
 	await stream.result();
 	const acceptedReflections = Array.from(accumulated.values());

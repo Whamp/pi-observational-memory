@@ -15,6 +15,7 @@ import {
 } from "../src/agents/dropper/agent.js";
 import { summarizeSupportIdCounts } from "../src/agents/reflector/agent.js";
 import type { Observation, Reflection } from "../src/session-ledger/index.js";
+import { observationLineTokenCount } from "../src/tokens.js";
 import {
 	PROPERTY_OPTIONS,
 	entryIdArb,
@@ -49,7 +50,7 @@ describe("dropper property invariants", () => {
 		fc.assert(
 			fc.property(observationsArb, fc.integer({ min: -100, max: 5_000 }), (observations, targetTokens) => {
 				// Arrange
-				const expectedTokens = observations.reduce((sum, observation) => sum + observation.tokenCount, 0);
+				const expectedTokens = observations.reduce((sum, observation) => sum + observationLineTokenCount(observation), 0);
 
 				// Act
 				const metrics = observationPoolMetrics(observations, targetTokens);
@@ -74,7 +75,7 @@ describe("dropper property invariants", () => {
 				// Arrange
 				const lowerTarget = Math.min(a, b);
 				const higherTarget = Math.max(a, b);
-				const observationTokens = observations.reduce((sum, observation) => sum + observation.tokenCount, 0);
+				const observationTokens = observations.reduce((sum, observation) => sum + observationLineTokenCount(observation), 0);
 
 				// Act
 				const lowerTargetDrops = maxDropCountForPool(observations, observationTokens, lowerTarget);
@@ -91,7 +92,7 @@ describe("dropper property invariants", () => {
 		fc.assert(
 			fc.property(observationsArb, (observations) => {
 				// Arrange
-				const observationTokens = observations.reduce((sum, observation) => sum + observation.tokenCount, 0);
+				const observationTokens = observations.reduce((sum, observation) => sum + observationLineTokenCount(observation), 0);
 				const targets = [
 					-1,
 					0,

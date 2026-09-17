@@ -31,11 +31,13 @@ The extension loads config once for its runtime. After changing settings, restar
   "observational-memory": {
     "observeAfterTokens": 10000,
     "reflectAfterTokens": 20000,
+    "observerChunkMaxTokens": 60000,
     "compactAfterTokens": 81000,
-    "compactionTrigger": "auto",
     "observationsPoolMaxTokens": 20000,
     "observationsPoolTargetTokens": 10000,
     "agentMaxTurns": 16,
+    "agentMaxTokens": 32000,
+    "compactionTrigger": "agentSettled",
     "model": {
       "provider": "openrouter",
       "id": "google/gemma-4-31b-it",
@@ -53,36 +55,44 @@ You can omit everything. Defaults work for ordinary sessions, and if `model` is 
 ## Settings reference
 
 | Setting | Type | Default | What it controls |
-|---|---:|---:|---|
+| --- | ---: | ---: | --- |
 | `observeAfterTokens` | positive integer | `10000` | Raw/source token threshold for observer runs. |
 | `reflectAfterTokens` | positive integer | `20000` | Raw/source token threshold for reflector runs; successful reflection creates dropper maintenance opportunities. |
-| `compactAfterTokens` | positive integer | `81000` | Raw/source token threshold for proactive extension-triggered compaction when the effective `compactionTrigger` is `agentEnd` or `betweenTurns`. |
-| `compactionTrigger` | `auto`, `native`, `agentEnd`, or `betweenTurns` | `auto` | Whether and when the extension proactively calls `ctx.compact()`. Every mode still uses Compaction Authority. |
+| `observerChunkMaxTokens` | positive integer | derived; minimum `256` | Maximum estimated tokens sent to one observer run. Unset: 20% of the resolved memory model's context window, or `60000` when unknown. |
+| `compactAfterTokens` | positive integer | `81000` | Estimated source-entry threshold for proactive auto-compaction, counted after the latest compaction boundary. |
 | `observationsPoolMaxTokens` | positive integer | `20000` | Normal compaction-projection observation-token pressure that makes compaction do a full fold. |
 | `observationsPoolTargetTokens` | positive integer below max | half of `observationsPoolMaxTokens` | Folded active observation target used by post-reflection dropper maintenance. |
 | `agentMaxTurns` | positive integer | `16` | Shared nested-agent turn cap for observer, reflector, and dropper. |
-| `model` | object | unset | Shared fallback model for all stages; overridden by per-stage config. |
+| `agentMaxTokens` | positive integer | `32000` | Maximum output tokens requested for memory-agent loops. Clamped to the model's own `maxTokens` when available. Lower it for local servers with a modest context window. |
+| `compactionTrigger` | enum | `"agentSettled"` | `"agentSettled"` enables proactive compaction from Pi's settled lifecycle; `"native"` leaves timing to Pi. |
+| `model` | object | unset | Optional shared model override for observer, reflector, and dropper. |
+| `observer`, `reflector`, `dropper` | object | unset | Optional per-stage `{ model, thinking }` overrides. |
 | `model.provider` | string | unset | Provider name in Pi's model registry. Required when `model` is set. |
 | `model.id` | string | unset | Model id in Pi's model registry. Required when `model` is set. |
-| `model.thinking` | enum | unset; workers fall back to `low` | Shared fallback reasoning/thinking level for memory workers. |
-| `observer` | object | unset | Optional per-stage override; see [stage overrides](#stage-specific-model-and-thinking-overrides). |
-| `reflector` | object | unset | Optional per-stage override; the dropper inherits this by default. |
-| `dropper` | object | unset | Optional per-stage override; inherits the reflector when unset. |
+| `model.thinking` | enum | unset; workers fall back to `low` | Optional reasoning/thinking level for memory workers. |
 | `showWorkerNotifications` | boolean | `true` | Shows routine observer, reflector, and dropper progress notifications. |
 | `passive` | boolean | `false` | Disables proactive background memory and auto-compaction triggers. |
 | `debugLog` | boolean | `false` | Writes best-effort per-session extension debug events to Pi's agent directory. |
 
 Valid `model.thinking` values are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
 
-Invalid values are ignored. Positive-integer settings must be finite integers greater than zero. `compactionTrigger` must be one of `auto`, `native`, `agentEnd`, or `betweenTurns`. `observationsPoolTargetTokens` must also be below `observationsPoolMaxTokens`; if omitted or invalid, it is derived as `Math.floor(observationsPoolMaxTokens / 2)`.
+Invalid values are ignored. Positive-integer settings must be finite integers greater than zero. `observationsPoolTargetTokens` must also be below `observationsPoolMaxTokens`; if omitted or invalid, it is derived as `Math.floor(observationsPoolMaxTokens / 2)`.
 
 ## `observeAfterTokens`
 
 Default: `10000`.
 
-The observer runs from Pi's `turn_end` hook. It counts raw/source tokens after the latest Observation Coverage boundary. Recorded outcomes write a non-empty `om.observations.recorded` entry. Explicit Empty outcomes write `om.observer.completed` without creating observations. Both advance coverage. Failed outcomes write no coverage marker and leave the range eligible for another observer run.
+The observer runs from Pi's `turn_end` hook. It counts raw/source tokens after the greatest valid `om.observations.recorded` or `om.observer.completed` boundary. When the count reaches `observeAfterTokens`, the observer receives source entries after that marker.
 
-Lower values create smaller chunks and more frequent model calls. Higher values reduce model-call frequency but let unobserved raw conversation accumulate longer.
+A successful run appends either non-empty `om.observations.recorded` data or an explicit `om.observer.completed { outcome: "empty", coversUpToId }` marker. Both advance scheduling. Silence, malformed output, rejected proposals, stream errors, and aborted runs are failures and do not advance coverage. Empty is scheduling evidence only; it never gives observational memory compaction authority.
+
+## `observerChunkMaxTokens`
+
+Default: derived as 20% of the resolved memory model's context window, or `60000` when that window is unavailable.
+
+This caps the source-addressed text sent to one observer run. Complete source entries are added oldest-first while they fit; remaining entries stay eligible for later runs. If the oldest entry cannot fit, the observer does not receive a head/tail excerpt because an excerpt cannot justify full-source coverage. The source remains uncovered, and compaction delegates to Pi whenever that source affects the prune boundary.
+
+Set an explicit value when a provider exposes a context window that differs from Pi's model metadata. Values below `256` are clamped to `256`. Keep room for the observer system prompt, prior observations/reflections, tool schemas, and output; setting this equal to the full model window will usually fail.
 
 ## `reflectAfterTokens`
 
@@ -98,43 +108,11 @@ Lower values distill reflections more often and therefore create more opportunit
 
 Default: `81000`.
 
-`compactAfterTokens` applies when the effective `compactionTrigger` is `agentEnd` or `betweenTurns`. `agentEnd` keeps the legacy behavior: the extension counts raw/source tokens after the latest compaction boundary, defers from `agent_end` with `setTimeout(0)`, checks that Pi is idle, re-checks the threshold, and calls `ctx.compact()`.
+The auto-compaction trigger runs from Pi's `agent_settled` hook, after retries, automatic compaction, and queued continuation finish. It counts estimated source-entry tokens after the latest compaction boundary. The count starts at `firstKeptEntryId` when Pi provides that boundary, so retained source entries remain part of the metric. Memory ledger entries and compaction metadata contribute zero. If the count reaches `compactAfterTokens`, the extension defers with `setTimeout(0)`, checks that Pi is idle, re-checks the same metric, and calls `ctx.compact()`. Pi's provider context usage is not used for this threshold.
 
-`betweenTurns` checks the same token clock after a tool-bearing `turn_end`. Once due, it aborts the otherwise expected next model call, waits for idle `agent_settled`, and calls `ctx.compact()`. A successful compaction with proven headroom sends one hidden continuation signal in the same session. The originating prompt remains pending through nested cycles, so the policy works in TUI, RPC, text print, and JSON print modes. Terminal turns and turns with queued steering or follow-up messages do not arm it.
+This trigger does not wait for observer, reflector, or dropper work. Actual summary creation happens later in `session_before_compact`. Observational memory owns that compaction only when the replacement projection includes observation records covering the newly pruned source boundary. Stale memory, Empty-only progress, and cross-boundary batches excluded from the projection delegate to Pi's native summarizer.
 
-Neither proactive trigger waits for observer, reflector, or dropper work. Actual ownership is decided later in `session_before_compact`. Covered source uses V3's deterministic, model-free projection. Uncovered source delegates to Pi's compaction pipeline, which may call the configured native summarization model; successful fallback still continues a `betweenTurns` cycle.
-
-When the effective trigger is `native`, `compactAfterTokens` is ignored and Pi's own top-level `compaction` settings control when compaction happens. Pi's manual compaction also still runs the V3 `session_before_compact` hook.
-
-## `compactionTrigger`
-
-Default: `auto`.
-
-`compactionTrigger` controls whether and when this extension proactively calls `ctx.compact()`. It does not disable the V3 compaction hook. Every `session_before_compact` event runs the same Compaction Authority check. The hook returns an observational-memory summary only when Observation Coverage reaches the Pruned Source Boundary; otherwise it returns no override and does not cancel.
-
-Modes:
-
-- `auto`: use Pi native compaction timing in `print` and `json` modes; use the legacy `agent_end` trigger in `tui`, `rpc`, and unknown interactive modes.
-- `native`: never call extension `ctx.compact()` proactively. Pi's native top-level compaction settings decide timing. V3 supplies covered summaries and delegates uncovered source.
-- `agentEnd`: preserve the previous proactive behavior exactly: after `agent_end`, if raw/source tokens since the last compaction reach `compactAfterTokens` and Pi is idle, call `ctx.compact()`.
-- `betweenTurns`: opt in to proactive compaction after a due tool-bearing turn. Abort at the boundary, compact after settlement, then send one hidden same-session continuation signal only after successful compaction and headroom proof.
-
-For eval harnesses and `pi -p`, use `betweenTurns` when one submitted prompt must compact and keep working automatically. Prefer native timing when Pi should own threshold and overflow continuation:
-
-```json
-{
-  "observational-memory": {
-    "compactionTrigger": "native"
-  },
-  "compaction": {
-    "enabled": true,
-    "reserveTokens": 50000,
-    "keepRecentTokens": 20000
-  }
-}
-```
-
-In that setup, `observational-memory.compactionTrigger` says “do not proactively call `ctx.compact()`,” while Pi's top-level `compaction.reserveTokens` says how early native compaction should fire.
+Pi's own window-pressure compaction and manual compaction can still happen independently of this proactive trigger. Set `compactionTrigger` to `"native"` to disable only the extension's proactive call; the coverage-gated compaction hook remains active. Existing fork values `auto`, `agentEnd`, and `betweenTurns` normalize to `"agentSettled"`; the old abort/hidden-continuation behavior is intentionally not retained.
 
 ## `observationsPoolMaxTokens`
 
@@ -166,11 +144,19 @@ This is the shared nested-agent turn cap for the observer, reflector, and droppe
 
 Use lower values to bound background memory-worker cost. Too low can reduce observation coverage or reflection/drop quality.
 
+## `agentMaxTokens`
+
+Default: `32000`.
+
+This is the maximum number of output tokens the extension requests for each memory-agent loop (observer, reflector, dropper). It is always clamped to the model's own `maxTokens` when the model advertises one.
+
+Lower it when the memory model is a local server with a modest context window (for example, a llama.cpp server with a 64K slot). Slot KV is shared between the main session's retained cache and concurrent sub-agent requests, so a request whose combined input and response budget exceeds the window fails with `500 "Context size has been exceeded."` and the affected memory run aborts. Pairing a smaller `agentMaxTokens` (e.g. `8192`) with a low `observerChunkMaxTokens` keeps sub-agent requests inside the window.
+
 ## `model`
 
 Default: unset, meaning memory workers use the session model.
 
-Set `model` when you want the observer, reflector, and dropper to share a cheaper or faster model than the main coding agent. This is the shared fallback for every stage; set `observer`, `reflector`, or `dropper` to override a single stage (see [stage overrides](#stage-specific-model-and-thinking-overrides)):
+Set `model` when you want all three stages to use a cheaper or faster model than the main coding agent:
 
 ```json
 {
@@ -184,71 +170,23 @@ Set `model` when you want the observer, reflector, and dropper to share a cheape
 }
 ```
 
-`provider` and `id` must both be non-empty strings. `thinking` is optional. If the configured model cannot be resolved, the runtime attempts to fall back to the current session model and notifies once. If no usable model or API key is available, the relevant background worker skips/fails safely rather than inventing memory.
+Each of `observer`, `reflector`, and `dropper` may also provide `{ "model": { "provider": "…", "id": "…" }, "thinking": "…" }`. Observer and reflector fall back to the shared model. Dropper falls back through reflector, then shared. Stage settings use the same provider/authentication/environment/base-URL path as every other memory model.
 
-## Stage-specific model and thinking overrides
+`provider` and `id` must both be non-empty strings. `thinking` is optional. If the configured model cannot be resolved, the runtime attempts to fall back to the current session model and notifies once. Memory workers accept either an API key or OAuth-style auth headers (e.g. `Authorization: Bearer …`), so OAuth-authenticated providers work without an API key. If no usable model or credentials are available, the relevant background worker skips/fails safely rather than inventing memory.
 
-The observer, reflector, and dropper are different jobs and may want different models or thinking levels. Each stage accepts an optional `model` and `thinking` override:
-
-```json
-{
-  "observational-memory": {
-    "model": { "provider": "openrouter", "id": "shared-memory-model", "thinking": "low" },
-    "observer": { "thinking": "off" },
-    "reflector": { "model": { "provider": "openrouter", "id": "a-stronger-reflector", "thinking": "high" } },
-    "dropper": { "thinking": "medium" }
-  }
-}
-```
-
-Each stage object has the same shape and accepts:
-
-- `model` (object): a `{ provider, id, thinking? }` override for that stage only.
-- `thinking` (enum): one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` for that stage only.
-
-Invalid stage config (non-object, empty models, unknown thinking values) is ignored, the same as invalid top-level config.
-
-### Resolution order
-
-When a value is unset, the resolver walks a fixed fallback chain so defaults are unchanged when no stage config is present.
-
-Model lookup (the model each stage runs on):
-
-```text
-observer.model   ?? model            ?? session model
-reflector.model  ?? model            ?? session model
-dropper.model    ?? reflector.model  ?? model ?? session model
-```
-
-Thinking level:
-
-```text
-observer.thinking   ?? observer.model.thinking   ?? model.thinking ?? "low"
-reflector.thinking  ?? reflector.model.thinking  ?? model.thinking ?? "low"
-dropper.thinking    ?? dropper.model.thinking    ?? reflector.thinking ?? model.thinking ?? "low"
-```
-
-The dropper inherits the reflector's settings by default because dropping is a judgment/compression task closer to reflection than literal observation. The dropper remains its own stage and can override both `model` and `thinking` independently.
-
-### Defaults are unchanged
-
-If you set none of `observer`, `reflector`, or `dropper`, every stage resolves to the shared `model` and `model.thinking ?? "low"` — exactly the previous behavior.
-
-### Choosing stage models
-
-Do not hardcode specific model ids in shared defaults; treat these as benchmark-driven choices. The observer tends to work best with cheap, literal, low/off thinking capture, while the reflector and dropper may benefit from more judgment. Configure per stage based on your own evaluation, and prefer measuring solve rate with your own tasks before committing to a split.
+Workers stream through Pi's composed provider runtime, not `@earendil-works/pi-ai/compat` alone. Session models whose `api` id comes from `pi.registerProvider` (`cursor-sdk`, CLIProxyAPI, commandcode, and other custom APIs) work without a second built-in provider. `model` remains optional: set it only when you want cheaper/faster workers than the coding agent. Leaving it unset is the Cursor-only setup.
 
 ## `showWorkerNotifications`
 
 Default: `true`.
 
-When `false`, the extension hides routine observer, reflector, and dropper start/completion notifications. Model resolution warnings, no-output warnings, worker failures, compaction notifications, and explicit `/om:*` command output remain visible.
+When `false`, the extension hides routine observer, reflector, and dropper progress notifications (including deliberate-empty observer info messages). Model fallback/unavailability, worker failures (including observer stream errors), compaction notifications, and explicit `/om:*` command output remain visible.
 
 ## `passive`
 
 Default: `false`.
 
-When `true`, the extension does not proactively run the observer, reflector/dropper lane, or auto-compaction trigger. Manual and Pi compactions still run the authority check. Covered source uses prepared OM memory; uncovered source delegates to Pi's native summarization path. `/om:status`, `/om:view`, `/om:view full`, and `recall` remain available.
+When `true`, the extension does not proactively run the observer, reflector/dropper lane, or auto-compaction trigger. Manual/Pi compaction hooks, `/om:status`, `/om:view`, and `recall` remain available.
 
 Environment override:
 
@@ -278,7 +216,7 @@ Contexts without a usable session id fall back to the legacy global file:
 observational-memory/debug.ndjson
 ```
 
-Each row includes event metadata such as `sessionId`, `sessionFile`, `runId`, `cwd`, and event-specific `data`. `runId` identifies one consolidation pipeline inside a session file, so you can filter a session log to a single observer/reflector/dropper pass. `compaction.authority` records the selected owner, reason, and valid coverage/prune boundary ids without source or memory content.
+Each row includes event metadata such as `sessionId`, `sessionFile`, `runId`, `cwd`, and event-specific `data`. `runId` identifies one consolidation pipeline inside a session file, so you can filter a session log to a single observer/reflector/dropper pass.
 
 Dropper diagnostics are especially useful when the active observation pool is over target but no drops are appended. For example:
 
@@ -297,9 +235,9 @@ Debug-log write failures do not change memory behavior.
 V3 is not backwards compatible with V2 settings. Old keys are silently ignored and do not act as aliases.
 
 | V2 setting | V3 setting | Migration note |
-|---|---|---|
+| --- | --- | --- |
 | `observationThresholdTokens` | `observeAfterTokens` | Rename. Same rough observer-cadence role. |
-| `compactionThresholdTokens` | `compactAfterTokens` | Rename. Same rough proactive-compaction role when the effective `compactionTrigger` is `agentEnd` or `betweenTurns`; native timing uses Pi's top-level `compaction` settings. |
+| `compactionThresholdTokens` | `compactAfterTokens` | Rename. Same rough proactive-compaction role. |
 | `reflectionThresholdTokens` | `reflectAfterTokens`, `observationsPoolMaxTokens`, and/or `observationsPoolTargetTokens` | Split. Use `reflectAfterTokens` for reflector cadence, `observationsPoolMaxTokens` for compaction full-fold pressure, and `observationsPoolTargetTokens` for dropper active observation maintenance. |
 | `compactionModel` | `model` | Move `{ provider, id }` under `model`. |
 | `thinkingLevel` | `model.thinking` | Move under `model`. |
@@ -343,20 +281,6 @@ Tradeoff: fewer background model calls, but memory updates lag longer, observati
 ```
 
 Tradeoff: more background model calls.
-
-### Split observer and reflector models
-
-```json
-{
-  "observational-memory": {
-    "model": { "provider": "openrouter", "id": "a-fast-model", "thinking": "low" },
-    "observer": { "thinking": "off" },
-    "reflector": { "model": { "provider": "openrouter", "id": "a-stronger-reflector", "thinking": "high" } }
-  }
-}
-```
-
-The observer uses the shared model with thinking off (literal, cheap capture). The reflector runs a stronger model with higher thinking. The dropper is unset, so it inherits the reflector's model and thinking. Measure this against a single shared model on your own tasks before committing.
 
 ### Disable proactive work temporarily
 

@@ -23,7 +23,7 @@ type Observation = {
   timestamp: string;          // YYYY-MM-DD HH:MM
   relevance: "low" | "medium" | "high" | "critical";
   sourceEntryIds: string[];   // raw/source entries that support this observation
-  tokenCount: number;         // estimated content tokens
+  tokenCount: number;         // estimated rendered summary-line tokens
 }
 ```
 
@@ -70,9 +70,9 @@ Dropping does not delete history. Dropped observations remain recallable from le
 
 ### Observer
 
-The observer runs asynchronously from `turn_end` when raw/source tokens after the latest observation coverage marker reach `observeAfterTokens`.
+The observer runs asynchronously from `turn_end` when raw/source tokens after the latest observation scheduling boundary reach `observeAfterTokens`.
 
-It receives raw/source entries only and reports a Recorded, Empty, or Failed outcome. Recorded appends a non-empty `om.observations.recorded` entry. Explicit Empty appends `om.observer.completed` without creating observations. Both advance Observation Coverage. Failed appends no coverage marker, remains visible as an error, and leaves the range eligible for another observer run.
+It receives an oldest-first chunk of complete raw/source entries, validates source ids, and returns one of three outcomes. Recorded appends non-empty `om.observations.recorded`; explicit Empty appends `om.observer.completed` and advances only the scheduling clock; Failed appends no progress. Oversized entries are never represented as fully covered by a head/tail excerpt.
 
 ### Reflector
 
@@ -88,20 +88,18 @@ The dropper can only drop active observation ids. It cannot rewrite or merge obs
 
 ### Compaction hook
 
-The compaction hook runs during `session_before_compact`. It first decides Compaction Authority by comparing source-backed Observation Coverage with the Pruned Source Boundary.
-
-When observational memory has authority, the hook is deterministic and model-free:
+The compaction hook runs during `session_before_compact`. When V3 memory exists, it is deterministic and model-free:
 
 - it does not run observer, reflector, or dropper;
 - it does not call a model;
 - it does not wait for background memory workers;
 - it folds/projects ledger state and renders the summary.
 
-When coverage is short or cannot be proved safe, the hook returns no override and does not cancel. Pi or another handler can then summarize the uncovered source. The covered path remains fast; the fallback path may use Pi's summarization model.
+The hook returns an extension compaction only when the projection itself contains observation records covering Pi's newly pruned source boundary. Empty-only scheduling progress, stale non-empty memory, and projection-excluded cross-boundary batches delegate to Pi's native summarizer. Covered V3 compactions remain effectively instantaneous compared with V2.
 
 ## Ledger entries
 
-V3 uses four custom coverage and memory ledger entry types:
+V3 uses four custom memory ledger entry types:
 
 ```ts
 om.observer.completed: {
@@ -141,7 +139,7 @@ Old V2 memory entry/details formats are ignored.
 
 ## `coversUpToId`
 
-`coversUpToId` is a progress watermark. It tells V3 where a worker's raw/source-token progress has reached. Observation Coverage is the greatest valid source boundary from a Recorded `om.observations.recorded` entry or an explicit Empty `om.observer.completed` entry.
+`coversUpToId` is a progress watermark. It tells V3 where a worker's raw/source-token progress has reached. Observer scheduling uses the greatest valid Recorded or explicit Empty boundary; reflector, dropper, projection, and compaction authority remain tied to their own recorded memory evidence.
 
 It is not:
 
@@ -157,8 +155,8 @@ Progress counting uses raw/source tokens after the marker. Raw/source entries ar
 
 V3 distinguishes visible memory, full memory, and the drift between them:
 
-- **Visible memory** — structured memory in the latest compaction entry. Valid `om.folded` details are visible; a latest native or non-OM compaction has no visible structured observational memory. This is what `/om:view` shows by default.
-- **Full memory** — full V3 ledger truth folded at the branch tip. Native fallback does not remove it. This is what `/om:view full` shows.
+- **Visible memory** — what the latest `om.folded` compaction details made visible to the agent. This is what `/om:view` shows by default.
+- **Full memory** — full V3 ledger truth folded at the branch tip. This is what `/om:view full` shows.
 - **Drift** — the difference between visible and full memory. Use `/om:status` to inspect visible-vs-full drift.
 
 Visible and full memory can differ intentionally. Background ledger work may happen after the latest compaction, and normal compactions may avoid re-folding reflection/drop effects until full-fold pressure requires it.
@@ -208,9 +206,6 @@ When upgrading from V2, update settings and start a new clean session.
 | Full memory | Full V3 ledger truth folded at branch tip or another boundary. |
 | Full fold | Compaction mode that folds observations, reflections, and drops through the boundary. |
 | Progress watermark | `coversUpToId`; marker used for raw-token progress clocks. |
-| Observation Coverage | Greatest source boundary trustworthily evaluated by a Recorded or explicit Empty observer outcome. |
-| Pruned Source Boundary | Final source entry the current compaction will newly remove from active context. |
-| Compaction Authority | Decision about whether observational memory or Pi's compaction pipeline may provide the summary. |
 | Observer | Background agent that records observations. |
 | Reflector | Background agent that records durable reflections. |
 | Dropper | Background agent that drops active observations by id. |

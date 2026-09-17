@@ -5,7 +5,6 @@ import {
 	DEFAULTS,
 	THINKING_LEVEL_VALUES,
 	readEnvConfig,
-	resolveEffectiveCompactionTrigger,
 	resolveStageModel,
 	type Config,
 	type ConfiguredModel,
@@ -35,7 +34,6 @@ import {
 	reflectionArb,
 } from "./fixtures/property.js";
 
-const modeArb = fc.option(fc.oneof(fc.constantFrom("print", "json", "tui", "rpc"), fc.string()), { nil: undefined });
 const modelArb: fc.Arbitrary<ConfiguredModel> = fc.record({
 	provider: fc.constantFrom("openrouter", "anthropic", "google"),
 	id: fc.string({ minLength: 1 }),
@@ -68,20 +66,8 @@ function configWithModelFields(args: {
 }
 
 describe("config, type, and serialization property invariants", () => {
-	it("should resolve effective compaction trigger deterministically for all modes", () => {
-		fc.assert(
-			fc.property(fc.constantFrom(...COMPACTION_TRIGGER_VALUES), modeArb, (compactionTrigger, mode) => {
-				// Act
-				const effective = resolveEffectiveCompactionTrigger({ compactionTrigger }, mode);
-
-				// Assert
-				if (compactionTrigger === "native") expect(effective).toBe("native");
-				else if (compactionTrigger === "agentEnd") expect(effective).toBe("agentEnd");
-				else if (compactionTrigger === "betweenTurns") expect(effective).toBe("betweenTurns");
-				else expect(effective).toBe(mode === "print" || mode === "json" ? "native" : "agentEnd");
-			}),
-			PROPERTY_OPTIONS,
-		);
+	it("should expose only Pi-settled and explicit native compaction modes", () => {
+		expect(COMPACTION_TRIGGER_VALUES).toEqual(["agentSettled", "native"]);
 	});
 
 	it("should resolve stage model inheritance without inventing configured models", () => {

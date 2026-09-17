@@ -1,5 +1,4 @@
-import { streamSimple } from "@earendil-works/pi-ai/compat";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import {
 	maxDropCountForPool,
@@ -8,6 +7,7 @@ import {
 	runDropper,
 	selectDropCandidates,
 } from "../src/agents/dropper/agent.js";
+import { AGENT_LOOP_MAX_TOKENS } from "../src/model-budget.js";
 import { observation, reflection } from "./fixtures/session.js";
 
 function fakeAgentLoop(handler: (prompts: any[], context: any, config: any) => Promise<void> | void): any {
@@ -19,6 +19,60 @@ function fakeAgentLoop(handler: (prompts: any[], context: any, config: any) => P
 		},
 	})) as any;
 }
+
+describe("runDropper maxTokens clamping", () => {
+	const args = {
+		apiKey: "test",
+		reflections: [reflection("eeeeeeeeeeee", ["aaaaaaaaaaaa"])],
+		observations: [
+			observation("aaaaaaaaaaaa", { relevance: "medium" }),
+			observation("bbbbbbbbbbbb", { relevance: "low" }),
+		],
+		targetTokens: 20,
+	};
+
+	function captureLoopConfig() {
+		let loopConfig: any;
+		const loop = fakeAgentLoop((_prompts, _context, config) => {
+			loopConfig = config;
+		});
+		return { loop, config: () => loopConfig };
+	}
+
+	it("clamps the loop maxTokens to a model whose maxTokens is below the configured budget", async () => {
+		const { loop, config } = captureLoopConfig();
+
+		await runDropper({
+			...args,
+			model: { maxTokens: 8_192 } as any,
+			maxOutputTokens: 32_000,
+			agentLoop: loop,
+		});
+
+		expect(config().maxTokens).toBe(8_192);
+	});
+
+	it("passes the configured maxOutputTokens through when the model advertises no maxTokens", async () => {
+		const { loop, config } = captureLoopConfig();
+
+		await runDropper({
+			...args,
+			model: {} as any,
+			maxOutputTokens: 8_192,
+			agentLoop: loop,
+		});
+
+		expect(config().maxTokens).toBe(8_192);
+	});
+
+	it("defaults the loop maxTokens to AGENT_LOOP_MAX_TOKENS", async () => {
+		const { loop, config } = captureLoopConfig();
+
+		await runDropper({ ...args, model: {} as any, agentLoop: loop });
+
+		expect(config().maxTokens).toBe(AGENT_LOOP_MAX_TOKENS);
+	});
+});
 
 describe("V3 dropper agent", () => {
 	const obsA = observation("aaaaaaaaaaaa", { relevance: "medium" });
@@ -92,14 +146,6 @@ describe("V3 dropper agent", () => {
 		expect(systemPrompt).not.toContain("Urgency guidance");
 	});
 
-	it("passes Pi's standard stream function to the agent loop", async () => {
-		const loop = vi.fn(fakeAgentLoop(() => {}));
-
-		await runDropper({ ...baseArgs, agentLoop: loop });
-
-		expect(loop).toHaveBeenCalledWith(expect.any(Array), expect.any(Object), expect.any(Object), undefined, streamSimple);
-	});
-
 	it("passes target-return max drops as a hard upper bound", async () => {
 		let userText = "";
 		const loop = fakeAgentLoop((prompts) => {
@@ -108,11 +154,12 @@ describe("V3 dropper agent", () => {
 
 		await runDropper({ ...baseArgs, agentLoop: loop });
 
-		expect(userText).toContain("fullness against target: ~150%");
-		expect(userText).toContain("over target by ~10 tokens");
+		// Pool metrics count full rendered lines: 19 + 18 + 19 = 56 tokens against a 20-token target.
+		expect(userText).toContain("fullness against target: ~280%");
+		expect(userText).toContain("over target by ~36 tokens");
 		expect(userText).toContain("[coverage: partial]");
 		expect(userText).toContain("[coverage: none]");
-		expect(userText).toContain("Maximum drops allowed this run: 1 observation");
+		expect(userText).toContain("Maximum drops allowed this run: 2 observations");
 		expect(userText).toContain("sized to move the active pool toward the target");
 		expect(userText).toContain("hard upper bound, not a target");
 		expect(userText).toContain("Drop fewer or none");
@@ -180,7 +227,8 @@ describe("V3 dropper agent", () => {
 			await context.tools[0].execute("tool-1", { ids: ["aaaaaaaaaaaa", "missing", "bbbbbbbbbbbb"] });
 		});
 
-		await expect(runDropper({ ...baseArgs, agentLoop: loop })).resolves.toEqual(["aaaaaaaaaaaa"]);
+		// Rendered-line pool is 56 tokens; a 40-token target caps the run at 1 drop.
+		await expect(runDropper({ ...baseArgs, targetTokens: 40, agentLoop: loop })).resolves.toEqual(["aaaaaaaaaaaa"]);
 	});
 
 	it("returns critical proposed ids when they are the selected valid candidates", async () => {
@@ -205,7 +253,8 @@ describe("V3 dropper agent", () => {
 			await context.tools[0].execute("tool-2", { ids: ["bbbbbbbbbbbb", "aaaaaaaaaaaa"] });
 		});
 
-		await expect(runDropper({ ...baseArgs, agentLoop: loop })).resolves.toEqual(["aaaaaaaaaaaa"]);
+		// Rendered-line pool is 56 tokens; a 40-token target caps the run at 1 drop.
+		await expect(runDropper({ ...baseArgs, targetTokens: 40, agentLoop: loop })).resolves.toEqual(["aaaaaaaaaaaa"]);
 	});
 
 	it("returns undefined when no tool call drops observations", async () => {
@@ -221,8 +270,9 @@ describe("V3 dropper agent", () => {
 
 		await expect(runDropper({
 			...baseArgs,
-			observations: [observation("aaaaaaaaaaaa", { relevance: "low", tokenCount: 10 })],
-			targetTokens: 10,
+			// The rendered line for this observation is 18 tokens; an 18-token target is exactly at target.
+			observations: [observation("aaaaaaaaaaaa", { relevance: "low" })],
+			targetTokens: 18,
 			agentLoop: loop,
 		})).resolves.toBeUndefined();
 		expect(called).toBe(false);

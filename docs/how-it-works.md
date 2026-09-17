@@ -2,7 +2,7 @@
 
 This is the V3 technical reference for `pi-observational-memory`.
 
-V3 is ledger-centered: memory state is reconstructed by folding V3 ledger entries on the current branch. Covered compaction is model-free and renders a projection of that ledger. When Observation Coverage does not reach the Pruned Source Boundary, the extension delegates so Pi can summarize uncovered source.
+V3 is ledger-centered: memory state is reconstructed by folding V3 ledger entries on the current branch. It renders a projection model-free only when that exact projection includes observations covering the source Pi will prune. Otherwise Pi's native summarizer owns compaction.
 
 ## Runtime entry points
 
@@ -12,9 +12,8 @@ V3 is ledger-centered: memory state is reconstructed by folding V3 ledger entrie
 |---|---|
 | `turn_end` observer trigger | Maybe run the observer in the background. |
 | `turn_end` reflect/drop trigger | Maybe run the due reflector, then run dropper maintenance only after same-run successful reflection. |
-| `turn_end` between-turn compaction trigger | With opt-in `betweenTurns`, abort after due tool work so compaction can run once Pi settles. |
-| `agent_end` compaction trigger | Maybe call `ctx.compact()` when effective `compactionTrigger` is `agentEnd`, Pi is idle, and raw/source tokens are over `compactAfterTokens`. |
-| `session_before_compact` hook | Decide Compaction Authority; render a deterministic V3 summary when covered or delegate when uncovered. |
+| `agent_settled` compaction trigger | Maybe call `ctx.compact()` when idle and over `compactAfterTokens`, after Pi finishes retries and queued continuation. |
+| `session_before_compact` hook | Build the V3 compaction payload deterministically. |
 | `/om:status` | Show ledger counts, drift, progress clocks, and worker state. |
 | `/om:view` | Show visible or full memory content and attempt to copy the rendered memory text. |
 | `recall` tool | Recover source evidence for a memory id. |
@@ -24,11 +23,11 @@ V3 is ledger-centered: memory state is reconstructed by folding V3 ledger entrie
 ```mermaid
 flowchart TD
     TE[turn_end]
-    AE[agent_end]
+    AE[agent_settled]
     SBC[session_before_compact]
 
-    ObsDue{raw tokens since Observation Coverage<br/>≥ observeAfterTokens?}
-    Observer[Observer model call<br/>Recorded, Empty, or Failed]
+    ObsDue{raw tokens since observation coverage<br/>≥ observeAfterTokens?}
+    Observer[Observer model call<br/>append om.observations.recorded]
 
     ReflectDropDue{observer not due<br/>and reflection/drop clock due?}
     BothDue{both due?}
@@ -36,20 +35,12 @@ flowchart TD
     Reflector[Reflector model call<br/>append om.reflections.recorded]
     Dropper[Dropper model call<br/>append om.observations.dropped]
 
-    TriggerMode{effective compactionTrigger<br/>agentEnd?}
     CompactDue{raw tokens since compaction<br/>≥ compactAfterTokens<br/>and idle?}
-    BetweenDue{effective betweenTurns,<br/>tool-bearing, due, queue empty?}
-    AbortSettle[abort next call<br/>wait for agent_settled]
     CompactCall[ctx.compact]
-    Continue[hidden same-session<br/>continuation signal]
-    Native[Pi native/manual compaction]
 
-    Authority{Observation Coverage reaches<br/>Pruned Source Boundary?}
     Fold[fold/project V3 ledger]
     Render[render deterministic summary]
     Details[return om.folded details]
-    Delegate[return no override]
-    PiSummary[Pi or later handler summarizes]
 
     TE --> ObsDue
     ObsDue -- yes --> Observer
@@ -60,18 +51,10 @@ flowchart TD
     ReflectorOnly -- yes --> Reflector
     ReflectorOnly -- no --> Dropper
 
-    AE --> TriggerMode
-    TriggerMode -- yes --> CompactDue
+    AE --> CompactDue
     CompactDue -- yes --> CompactCall
-    TE --> BetweenDue
-    BetweenDue -- yes --> AbortSettle --> CompactCall
     CompactCall --> SBC
-    Native --> SBC
-    SBC --> Authority
-    Authority -- yes --> Fold --> Render --> Details
-    Authority -- no --> Delegate --> PiSummary
-    Details -. successful betweenTurns .-> Continue
-    PiSummary -. successful betweenTurns .-> Continue
+    SBC --> Fold --> Render --> Details
 ```
 
 The observer has priority. Reflect/drop does not run on a turn where observer work is due.
@@ -90,16 +73,16 @@ Every V3 ledger entry has `data.coversUpToId`. That field is a progress and proj
 
 | Worker/trigger | Progress source |
 |---|---|
-| Observer | greatest valid Recorded `om.observations.recorded` or Empty `om.observer.completed` source boundary |
+| Observer scheduling | greatest valid `om.observations.recorded` or explicit Empty `om.observer.completed` boundary |
 | Reflector | latest `om.reflections.recorded.data.coversUpToId` |
 | Dropper | latest `om.observations.dropped.data.coversUpToId` |
-| Proactive compaction | latest compaction boundary |
+| Auto-compaction | latest compaction boundary |
 
 The watermark is also used to decide whether a memory ledger entry belongs to a bounded projection. It is not provenance. Provenance lives in `sourceEntryIds` and `supportingObservationIds`.
 
 ## Ledger data shapes
 
-### Empty observer completion
+### Observer completed Empty
 
 ```ts
 customType: "om.observer.completed"
@@ -109,7 +92,7 @@ data: {
 }
 ```
 
-This marker records a trustworthy Empty outcome. It advances Observation Coverage but creates no observations and does not advance reflection or drop coverage.
+This records successful scheduling progress without fabricating memory. It does not advance reflector/dropper evidence or grant compaction authority.
 
 ### Observations recorded
 
@@ -191,17 +174,18 @@ The observer trigger runs on `turn_end`.
 
 1. Load config if needed.
 2. Skip if `passive` is true.
-3. Skip if observer work is already in flight.
-4. Count raw/source tokens since latest Observation Coverage.
+3. Skip if `observerInFlight` is true.
+4. Count raw/source tokens since the greatest valid Recorded or explicit Empty observation boundary.
 5. Skip if below `observeAfterTokens`.
-6. Select and serialize source entries after the latest coverage marker.
-7. Resolve the memory model and run `runObserver()` in a background task.
-8. Validate source ids, compute deterministic ids, and classify the result.
-9. If at least one observation is accepted, append `om.observations.recorded` and classify the run as Recorded.
-10. If the observer explicitly reports an empty list with no rejected proposals, append `om.observer.completed` and classify the run as Empty.
-11. If every proposal is rejected or no structured outcome is reported, append no coverage marker and classify the run as Failed.
+6. Select the oldest complete-entry chunk after that boundary.
+7. Serialize those source entries for the observer prompt.
+8. Resolve the observer's stage model through Pi's provider/authentication path.
+9. Run `runObserver()` in a background task.
+10. Validate source ids returned by the model.
+11. Compute deterministic 12-character ids and per-observation rendered-line token counts in code.
+12. Append `om.observations.recorded` for Recorded or `om.observer.completed` for explicit Empty.
 
-Recorded and Empty advance Observation Coverage. Failed records an operational error, warns the user, and leaves the source eligible for another observer run.
+Silence, rejected proposals, malformed output, API errors, aborted streams, and empty input are Failed outcomes and append no progress. Explicit Empty is durable, so the same source is not reconsidered after restart, but it does not become replacement context. Chunks include only complete entries; an oversized first entry produces no observer call rather than a false full-source provenance claim.
 
 ## Reflect/drop flow
 
@@ -222,62 +206,48 @@ Reflect/drop also runs on `turn_end`, but only when the observer is not due.
 
 Reflector no-output and reflector failure skip same-turn dropper. Dropper failure does not roll back already-appended reflections.
 
-## Proactive compaction triggers
+## Auto-compaction trigger
 
-The extension supports two proactive timings. `agentEnd` preserves the legacy post-run trigger. Opt-in `betweenTurns` compacts after due tool work and resumes the same submitted prompt.
+The auto-compaction trigger runs on `agent_settled`, after Pi has finished automatic retries, automatic compaction, and queued continuation.
 
-Effective trigger policy:
-
-- `native`: never call extension `ctx.compact()` proactively.
-- `agentEnd`: use the legacy `agent_end` threshold trigger.
-- `betweenTurns`: use the tool-bearing `turn_end` → idle `agent_settled` trigger in every Pi mode.
-- `auto`: use `native` in `print` and `json`; use `agentEnd` in `tui`, `rpc`, and unknown interactive modes.
-
-When the effective trigger is `agentEnd`, it skips when:
+It skips when:
 
 - `passive` is true;
 - compaction is already in flight;
-- the agent end event is a retryable error;
-- raw/source tokens since last compaction are below `compactAfterTokens`;
+- estimated source-entry progress after the latest compaction boundary is below `compactAfterTokens`;
 - Pi is not idle after the deferred check;
-- the threshold is no longer met after the deferred check.
+- the raw threshold is no longer met after the deferred check.
 
-When all checks pass, it calls `ctx.compact()`.
+The count starts at `firstKeptEntryId` when Pi provides that boundary. Memory
+ledger entries and compaction metadata contribute zero. The trigger uses this
+same raw metric before scheduling and in the deferred re-check, then calls
+`ctx.compact()` when all checks pass.
 
-When the effective trigger is `betweenTurns`, a cycle starts only after a tool-bearing turn when no steering or follow-up message is queued, no compaction is active, and the captured threshold is due. The trigger requests one abort, waits for idle `agent_settled`, and invokes the same manual `ctx.compact()` path. Terminal assistant turns never arm a cycle.
-
-A successful cycle sends one hidden custom message:
-
-```ts
-customType: "om.compaction.continue"
-content: "Continue the interrupted work from the compacted context."
-display: false
-options: { triggerTurn: true }
-```
-
-The message carries a unique token and the persisted compaction entry id in `details`. Its matching `message_start` consumes the token and returns the trigger to idle, so resumed tool work can earn another cycle. The parent `agent_settled` handler waits for the nested continuation's settlement. This nesting keeps TUI, RPC, text print, and JSON print runs alive through any number of independently earned cycles without an unconditional loop.
-
-The continuation requires four proofs: the manual compaction callback completed; a manual non-retrying `session_compact` event arrived during this cycle; the latest branch compaction is new and matches the callback boundary; and raw tokens after that boundary are below the threshold captured at `turn_end`. Pi 0.81 can report an older event entry when deterministic summaries repeat, so the latest branch entry—not the event entry id—proves persistence. Failed proof reports one invariant error and sends no signal.
-
-When the effective trigger is `native`, `compactAfterTokens` is ignored and Pi's own top-level compaction settings decide timing. Pi native and manual compactions still run the V3 authority check. The extension customizes covered compactions and delegates uncovered compactions. Native threshold and overflow recovery never create an Automatic continuation signal.
-
-Neither proactive trigger waits for observer, reflector, or dropper promises. That is intentional: background memory work should never make compaction feel stuck.
+This trigger does not wait for observer, reflector, or dropper promises. That is intentional: background memory work should never make compaction feel stuck. With `compactionTrigger: "native"`, the extension skips this proactive call and leaves timing to Pi; its compaction hook still participates.
 
 ## Compaction hook
 
 The compaction hook runs on `session_before_compact` and is the critical V3 latency path.
 
+It does only deterministic work:
+
 1. Guard against duplicate concurrent compaction hooks.
 2. Load config if needed.
-3. Resolve the Pruned Source Boundary: the final source entry newly removed before `firstKeptEntryId`, after the previous compaction boundary.
-4. Resolve the greatest valid source-backed Observation Coverage from Recorded and explicit Empty outcomes.
-5. Record the content-free authority decision in debug logs when enabled.
-6. If coverage reaches the prune boundary, build and render the deterministic projection and return `om.folded` details.
-7. Otherwise return no override and no cancellation so Pi or a later handler can summarize the source.
+3. Read `event.preparation.firstKeptEntryId` and `event.preparation.tokensBefore`.
+4. Build a compaction projection from branch entries and `firstKeptEntryId`.
+5. Prove that a projected observation batch covers the newly pruned source boundary.
+6. If that proof fails, return no extension result so Pi uses native compaction.
+7. Render the authorized projection and return `{ compaction: { summary, firstKeptEntryId, tokensBefore, details } }` where `details.type` is `om.folded`.
 
-The hook never runs observer, reflector, or dropper work and never waits for worker promises. The covered OM path calls no model. The delegated path may cause Pi to call its native summarization model after the hook returns.
+It does not:
 
-If another compaction hook is already in flight, the duplicate call returns `{ cancel: true }`.
+- call a model;
+- run a sync observer;
+- run reflector/dropper;
+- wait for worker promises;
+- append ledger entries.
+
+If another compaction hook is already in flight, it returns `{ cancel: true }`. Authority depends on projected Recorded evidence, not merely on a non-empty summary or a later watermark. This prevents stale memory and cross-boundary batches omitted by the projection from replacing pruned source.
 
 ## Projections
 
@@ -289,7 +259,7 @@ Full projection folds valid V3 observations, reflections, and drops from branch 
 
 ### Visible projection
 
-Visible projection without a boundary inspects the latest compaction entry. Valid V3 `om.folded` details become visible structured memory. If the latest compaction is native or has non-OM details, visible structured observational memory is empty; the projection never searches backward to an older OM compaction. Full ledger memory remains available.
+Visible projection without a boundary reads the latest V3 `om.folded` compaction details. This is what the agent currently sees.
 
 ### Compaction projection
 
@@ -341,7 +311,7 @@ Shows:
 
 ### `/om:view`
 
-Default mode shows visible structured memory and attempts to copy the rendered memory text to the clipboard. Visible memory is empty before the first V3 compaction and after a latest native compaction because no current `om.folded` details are in active context. Use `/om:view full` to inspect durable branch memory in either case.
+Default mode shows visible memory and attempts to copy the rendered memory text to the clipboard. If no V3 compaction has happened yet, visible memory can be empty because nothing has been folded into `om.folded` details; use `/om:view full` to inspect recorded branch memory before the first compaction.
 
 Clipboard copy uses platform clipboard commands (`pbcopy`, `clip`, `wl-copy`, `xclip`, `xsel`, or `termux-clipboard-set`). If copying succeeds, Pi shows `Copied /om:view output to clipboard.` If copying fails, the command still prints the memory view and shows a warning. The clipboard text is only the rendered memory content; it does not include the success/failure line.
 
@@ -368,12 +338,10 @@ Recall ignores old V2 memory by construction because it indexes only V3 ledger e
 
 - Worker in-flight flags prevent duplicate observer or reflect/drop runs.
 - Observer priority prevents reflect/drop from advancing while source text is due for observation.
-- Explicit Empty observer outcomes append coverage metadata but no observation records; Failed outcomes append no coverage marker.
+- Only an explicit structured Empty observer outcome appends `om.observer.completed`; silence and failure append no progress.
 - Invalid source/support/drop ids are filtered or rejected by code.
 - Background worker errors are recorded on runtime state and surfaced in `/om:status`.
 - Compaction does not wait for background workers; it folds whatever ledger state is already present.
-- Between-turn cancellation, errors, stale sessions, send failure, and shutdown clear the private cycle and release settlement waiters.
-- Wrong or duplicate continuation tokens do nothing; shutdown releases pending and active nested waiters in LIFO order.
 - Historical or invalid coverage markers are tolerated by progress helpers instead of throwing.
 
 ## V2 behavior
@@ -383,11 +351,9 @@ V3 does not use V2 state shapes. Old V2 custom memory entries, old V2 compaction
 ## Invariants
 
 - The branch-local V3 ledger is the memory source of truth.
-- The latest Pi compaction entry determines visible structured memory.
-- Covered OM compaction is deterministic and model-free; uncovered compaction delegates to the host pipeline.
-- Between-turn continuation follows only a successful feature-triggered manual compaction with persisted headroom.
-- Pi-owned threshold and overflow compaction never emit an Automatic continuation signal.
-- Observer input is raw/source entries only.
+- Pi compaction summaries represent what the agent sees.
+- Coverage-authorized V3 compaction projections are deterministic and model-free; all other projections delegate to Pi's native summarizer.
+- Observer input is raw/source entries only and coverage is never inferred from partial-entry excerpts.
 - `coversUpToId` is a progress/projection watermark, not provenance.
 - Kept observations and reflections are rendered without paraphrase.
 - Dropped observations remain recallable from ledger history.

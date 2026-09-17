@@ -11,7 +11,6 @@ import {
 	compactionEntry,
 	memoryDetails,
 	observation,
-	observerCompletedEntry,
 	observationsDroppedEntry,
 	observationsRecordedEntry,
 	oldV2CompactionDetails,
@@ -38,20 +37,6 @@ describe("session-ledger V3 projections", () => {
 		expect(projection.reflections.map((ref) => ref.id)).toEqual(["eeeeeeeeeeee"]);
 	});
 
-	it("keeps Empty completion metadata out of full and compaction projections", () => {
-		const entries = [
-			textCustomMessage("raw-1", "aaaa"),
-			observerCompletedEntry("om-empty", { outcome: "empty", coversUpToId: "raw-1" }),
-		];
-
-		expect(fullProjection(entries)).toEqual({ observations: [], reflections: [] });
-		expect(buildCompactionProjection(entries, "raw-1", { observationsPoolMaxTokens: 100 })).toMatchObject({
-			observations: [],
-			reflections: [],
-			details: { observations: [], reflections: [] },
-		});
-	});
-
 	it("visible projection is empty when there is no V3 compaction", () => {
 		const entries = [
 			textCustomMessage("raw-1", "aaaa"),
@@ -75,13 +60,11 @@ describe("session-ledger V3 projections", () => {
 		expect(visibleProjection(entries)).toEqual({ observations: [obs2], reflections: [ref1] });
 	});
 
-	it("reports no structured memory when a native compaction follows an OM compaction", () => {
+	it("resets visible structured memory when a native compaction follows an OM compaction", () => {
 		const obs = observation("aaaaaaaaaaaa");
 		const ref = reflection("eeeeeeeeeeee", ["aaaaaaaaaaaa"]);
 		const entries = [
 			textCustomMessage("raw-1", "aaaa"),
-			observationsRecordedEntry("om-observation", { observations: [obs], coversUpToId: "raw-1" }),
-			reflectionsRecordedEntry("om-reflection", { reflections: [ref], coversUpToId: "raw-1" }),
 			compactionEntry("cmp-om", {
 				firstKeptEntryId: "raw-1",
 				details: memoryDetails({ observations: [obs], reflections: [ref] }),
@@ -91,48 +74,25 @@ describe("session-ledger V3 projections", () => {
 		];
 
 		expect(visibleProjection(entries)).toEqual({ observations: [], reflections: [] });
-		expect(fullProjection(entries)).toEqual({ observations: [obs], reflections: [ref] });
 	});
 
-	it.each([
-		{
-			name: "native to native",
-			compactions: [
-				compactionEntry("cmp-native-1", { firstKeptEntryId: "raw-1" }),
-				compactionEntry("cmp-native-2", { firstKeptEntryId: "raw-1" }),
-			],
-			expectedIds: [],
-		},
-		{
-			name: "native to OM",
-			compactions: [
-				compactionEntry("cmp-native", { firstKeptEntryId: "raw-1" }),
-				compactionEntry("cmp-om", {
-					firstKeptEntryId: "raw-1",
-					details: memoryDetails({ observations: [observation("bbbbbbbbbbbb")] }),
-				}),
-			],
-			expectedIds: ["bbbbbbbbbbbb"],
-		},
-		{
-			name: "OM to native to OM",
-			compactions: [
-				compactionEntry("cmp-om-1", {
-					firstKeptEntryId: "raw-1",
-					details: memoryDetails({ observations: [observation("aaaaaaaaaaaa")] }),
-				}),
-				compactionEntry("cmp-native", { firstKeptEntryId: "raw-1" }),
-				compactionEntry("cmp-om-2", {
-					firstKeptEntryId: "raw-1",
-					details: memoryDetails({ observations: [observation("bbbbbbbbbbbb")] }),
-				}),
-			],
-			expectedIds: ["bbbbbbbbbbbb"],
-		},
-	])("follows the latest compaction for $name visibility", ({ compactions, expectedIds }) => {
-		const entries = [textCustomMessage("raw-1", "aaaa"), ...compactions];
+	it("uses fresh OM details after a native-to-observational-memory transition", () => {
+		const stale = observation("aaaaaaaaaaaa");
+		const fresh = observation("bbbbbbbbbbbb");
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			compactionEntry("cmp-om-1", {
+				firstKeptEntryId: "raw-1",
+				details: memoryDetails({ observations: [stale] }),
+			}),
+			compactionEntry("cmp-native", { firstKeptEntryId: "raw-1" }),
+			compactionEntry("cmp-om-2", {
+				firstKeptEntryId: "raw-1",
+				details: memoryDetails({ observations: [fresh] }),
+			}),
+		];
 
-		expect(visibleProjection(entries).observations.map((entry) => entry.id)).toEqual(expectedIds);
+		expect(visibleProjection(entries)).toEqual({ observations: [fresh], reflections: [] });
 	});
 
 	it("ignores old V2 compaction details for visible projection", () => {

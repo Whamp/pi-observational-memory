@@ -2,7 +2,7 @@
 > **V3 update notice:** this extension now uses the new V3 memory model. If you used V2, update your `observational-memory` settings before running this version. V3 does **not** read the old V2 settings or memory format, and you should start a new clean Pi session after upgrading. See [Migrating from V2](#migrating-from-v2).
 
 > [!NOTE]
-> The `master` branch is the active development branch and may include unreleased or unstable changes. For stable versions, install the published npm package with `pi install npm:pi-observational-memory`.
+> This fork is source-distributed and intentionally non-publishing. npm publication, release identity, and registry setup are deferred; install it from GitHub or a local checkout.
 
 # pi-observational-memory
 
@@ -115,12 +115,12 @@ Traditional compaction asks a model to rewrite the past at the moment the contex
 
 `pi-observational-memory` does the important memory work earlier, while the session is still happening.
 
-As you work, the extension captures observations and distills reflections in the background. When trustworthy Observation Coverage reaches the source Pi will prune, compaction is a fast rendering step instead of a new model call. If coverage is short, the extension steps aside so Pi can summarize the uncovered source rather than replace it with incomplete memory.
+As you work, the extension captures observations and distills reflections in the background. When Pi needs to compact, the memory is already prepared. Compaction becomes a fast rendering step instead of a slow summarization event.
 
 That gives you two big benefits:
 
-1. **Less coherence loss** — important context is preserved as observations and reflections, while uncovered source falls back to Pi's native summary.
-2. **Faster covered compaction** — the expensive memory work happens before compaction when coverage is ready.
+1. **Less coherence loss** — important context is preserved as observations and reflections instead of repeatedly compressed through summary chains.
+2. **Faster compaction** — the expensive memory work happens before compaction, not while you are waiting.
 
 ---
 
@@ -173,17 +173,17 @@ This extension is especially useful when the session contains decisions that sho
 
 ## Install
 
-```bash
-pi install npm:pi-observational-memory
-```
+Requires Pi 0.81.0 or newer. Proactive compaction uses the `agent_settled` lifecycle event introduced in that release.
 
-Or install from GitHub/local development:
+Install this fork from GitHub or a local checkout:
 
 ```bash
-pi install git:github.com/elpapi42/pi-observational-memory
-# or, from a local checkout:
+pi install git:github.com/Whamp/pi-observational-memory
+# or
 pi install /absolute/path/to/pi-observational-memory
 ```
+
+The repository is marked `private` in `package.json` to prevent accidental npm publication.
 
 Pi loads the extension from `src/index.ts` through the package `pi.extensions` entry.
 
@@ -210,10 +210,11 @@ A typical config:
     "compactAfterTokens": 81000,
     "compactAfterTokensMode": "calibrated",
     "compactAfterTokensRatio": 0.68,
-    "compactionTrigger": "auto",
     "observationsPoolMaxTokens": 20000,
     "observationsPoolTargetTokens": 10000,
     "agentMaxTurns": 16,
+    "agentMaxTokens": 32000,
+    "compactionTrigger": "agentSettled",
     "model": {
       "provider": "openrouter",
       "id": "google/gemma-4-31b-it",
@@ -228,48 +229,18 @@ A typical config:
 
 Most users can start with the defaults and tune only if they have a specific reason.
 
-### Choosing who triggers compaction
+If your memory model is a local llama.cpp server, size `agentMaxTokens` so that a worst-case request (observer chunk + prior memory + system prompt + the full response budget) fits inside the server's context: slot KV is shared between the main session's retained cache and concurrent sub-agent requests, so an over-budget sub-agent request fails with `500 "Context size has been exceeded."` and the affected memory run aborts. For example, on a 64K-slot server, pairing `"agentMaxTokens": 8192` with a low `observerChunkMaxTokens` keeps sub-agent requests well inside the window.
 
-`betweenTurns` is an opt-in proactive policy for tool-heavy work. When raw/source tokens reach the configured threshold after a tool-bearing turn, the extension aborts the otherwise expected next model call, compacts after Pi settles, and sends one hidden continuation signal in the same session:
+### Scaling compaction to the model's context window
 
-```json
-{
-  "observational-memory": {
-    "compactionTrigger": "betweenTurns"
-  }
-}
-```
-
-The submitted prompt stays pending through repeated compaction-and-continuation cycles, including in text and JSON print mode. Terminal assistant responses never start a cycle. Queued steering or follow-up messages take precedence, and successful uncovered compaction still uses Pi's native summarizer through the existing Compaction Authority fallback.
-
-For eval harnesses and `pi -p`, prefer Pi's native auto-compaction timing when you want Pi to compact only through its own threshold or overflow path:
-
-```json
-{
-  "observational-memory": {
-    "compactionTrigger": "native"
-  },
-  "compaction": {
-    "enabled": true,
-    "reserveTokens": 50000,
-    "keepRecentTokens": 20000
-  }
-}
-```
-
-When the effective trigger is `native`, the extension does not use `compactAfterTokens`, `compactAfterTokensMode`, or `compactAfterTokensRatio` to initiate compaction. Trigger choice does not change Compaction Authority: covered source uses the prepared OM summary, while uncovered source delegates to Pi.
-
-### Scaling extension-triggered compaction to the model's context window
-
-By default `compactAfterTokensMode` is `"calibrated"`, so extension-triggered
-compaction fires at the fixed `compactAfterTokens` value (81,000 by default).
-That is backwards-compatible and works well for typical ~128K–200K context
-models.
+By default `compactAfterTokensMode` is `"calibrated"`, so the proactive
+compaction trigger uses the fixed `compactAfterTokens` estimated source-entry
+threshold (81,000 by default). This preserves the pre-PR #40 compaction metric
+for typical ~128K–200K context models.
 
 On a large-context model (e.g. 1M tokens) the calibrated default preempts
-compaction at ~81K, wasting most of the window. When the effective trigger is
-`agentEnd` or `betweenTurns`, switch to `"ratio"` mode to scale the threshold with
-the active model's `contextWindow`:
+compaction at ~81K, wasting most of the window. Switch to `"ratio"` mode to let
+the trigger scale with the active model's `contextWindow`:
 
 ```json
 {
@@ -283,35 +254,40 @@ the active model's `contextWindow`:
 
 In ratio mode the effective threshold is
 `floor(model.contextWindow * compactAfterTokensRatio)` (clamped to a minimum of
-1). With the example above, a 1,000,000-token window compacts at ~500,000 raw
-tokens; a 200,000-token window compacts at ~100,000.
+1). With the example above, a 1,000,000-token window compacts after about
+500,000 estimated source-entry tokens after the latest compaction boundary; a
+200,000-token window uses about 100,000. The threshold counts source entries,
+not Pi's system prompt, tool schemas, or provider accounting. Pi's native
+window-pressure compaction remains independent.
 
 `compactAfterTokensRatio` is user-tunable precisely because **context window ≠
 attention**. Some models advertise a large window but degrade at long range; set
 a lower ratio (e.g. `0.4`) to compact earlier on those, or a higher ratio
 (e.g. `0.7`) on models that stay sharp. The default ratio is `0.68`.
 
-`compactAfterTokens` is retained as the fallback: in `"calibrated"` mode it is
-the threshold directly, and in `"ratio"` mode it is used whenever the active
-model's `contextWindow` is unavailable (undefined, 0, or negative), so
-compaction still triggers safely. `/om:status` shows the resolved threshold when
-the extension owns compaction timing.
+`compactAfterTokens` is always retained as the fallback: in `"calibrated"`
+mode it is the threshold directly, and in `"ratio"` mode it is used whenever
+the active model's `contextWindow` is unavailable (undefined, 0, or negative),
+so compaction still triggers safely. `/om:status` shows the resolved threshold
+on the `Next compaction` line regardless of mode.
 
 ### Defaults
 
 | Setting                     | Default       | Meaning                                                                                           |
 | --------------------------- | ------------- | ------------------------------------------------------------------------------------------------- |
 | `observeAfterTokens`        | `10000`       | Raw/source token threshold for observation runs.                                                  |
+| `observerChunkMaxTokens`    | derived       | Max estimated tokens serialized into one observer chunk (minimum `256`). Unset: `floor(contextWindow * 0.2)` of the resolved memory model, or `60000` when the window is unknown. Complete entries drain oldest-first; an entry that cannot fit is not excerpted or marked covered. |
 | `reflectAfterTokens`        | `20000`       | Raw/source token threshold for reflection runs; successful reflection creates dropper opportunities. |
-| `compactAfterTokens`        | `81000`       | Raw/source token threshold for extension-triggered compaction when effective trigger is `agentEnd` or `betweenTurns`; used directly in `"calibrated"` mode and as the fallback in `"ratio"` mode. |
-| `compactAfterTokensMode`    | `"calibrated"`| `"calibrated"` uses `compactAfterTokens` directly. `"ratio"` scales the threshold by the active model's `contextWindow`. Ignored when the effective trigger is `native`. |
-| `compactAfterTokensRatio`   | `0.68`        | In `"ratio"` mode, the threshold is `floor(contextWindow * ratio)`. Must be in `(0, 1)`. |
-| `compactionTrigger`         | `auto`        | `auto`, `native`, `agentEnd`, or opt-in `betweenTurns`; controls whether and when the extension proactively calls `ctx.compact()`. Every mode still uses Compaction Authority. |
+| `compactAfterTokens`        | `81000`       | Estimated source-entry threshold for proactive auto-compaction, counted after the latest compaction boundary. |
+| `compactAfterTokensMode`    | `"calibrated"`| `"calibrated"` uses `compactAfterTokens` directly. `"ratio"` scales the source-entry threshold by the active model's `contextWindow`. |
+| `compactAfterTokensRatio`   | `0.68`        | In `"ratio"` mode, the threshold is `floor(contextWindow * ratio)`. Tunable because large windows do not always mean strong long-range attention. Must be in `(0, 1)`. |
 | `observationsPoolMaxTokens` | `20000`       | Observation-token budget used for compaction full-fold pressure.                                  |
 | `observationsPoolTargetTokens` | half of max | Active observation target used by post-reflection dropper maintenance.                            |
 | `agentMaxTurns`             | `16`          | Shared turn cap for background memory-agent loops.                                                |
-| `model`                     | session model | Optional shared memory-worker model override: `{ provider, id, thinking }`. Per-stage overrides below.              |
-| `observer` / `reflector` / `dropper` | unset | Optional per-stage `{ model?, thinking? }` overrides. Dropper inherits reflector by default. See [configuration.md](docs/configuration.md#stage-specific-model-and-thinking-overrides). |
+| `agentMaxTokens`            | `32000`       | Maximum output tokens requested for memory-agent loops (observer/reflector/dropper), clamped to the model's own `maxTokens` when available. Lower it for local servers with a modest context window, e.g. `8192`. |
+| `compactionTrigger`         | `"agentSettled"` | `"agentSettled"` enables proactive compaction from Pi's native settled lifecycle; `"native"` disables the extension trigger while retaining the compaction hook. Legacy fork values map to `"agentSettled"`. |
+| `model`                     | session model | Optional shared memory-worker model override: `{ provider, id, thinking }`.                       |
+| `observer`, `reflector`, `dropper` | unset | Optional per-stage `{ model, thinking }` overrides. Dropper inherits the reflector model/thinking before the shared model. |
 | `showWorkerNotifications`   | `true`        | Shows routine observer, reflector, and dropper progress notifications. Warnings and errors are unaffected. |
 | `passive`                   | `false`       | Disables proactive background observation, reflection, maintenance, and auto-compaction triggers. |
 | `debugLog`                  | `false`       | Writes opt-in per-session extension debug events to Pi's agent directory.                         |
@@ -324,10 +300,11 @@ Valid `model.thinking` values are:
 * `medium`
 * `high`
 * `xhigh`
+* `max`
 
-If no `model` is configured, memory workers use the session model.
+If no model override is configured, memory workers use the session model, including custom `pi.registerProvider` APIs such as `cursor-sdk`. Per-stage overrides use the same Pi model registry, composed provider streams, authentication headers, environment, and base URL as the shared/session model path. You do not need a second built-in provider for observational memory to run.
 
-Set `showWorkerNotifications` to `false` to hide routine worker start and completion messages. Model resolution warnings, no-output warnings, worker failures, compaction notifications, and explicit `/om:*` command output remain visible.
+Set `showWorkerNotifications` to `false` to hide routine worker start and completion messages (including deliberate-empty observer info messages). Model fallback/unavailability, worker failures (including observer stream errors), compaction notifications, and explicit `/om:*` command output remain visible.
 
 `observationsPoolMaxTokens` and `observationsPoolTargetTokens` intentionally describe different pools. Max tokens control when compaction performs a full fold over visible memory. Target tokens control the folded active observation pool that the dropper maintains after successful reflection. If the target is omitted, it defaults to half of max.
 
@@ -343,12 +320,12 @@ For details and tuning guidance, see [`docs/configuration.md`](docs/configuratio
 
 | Surface             | What it does                                                                                                                                    |
 | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/om:status`        | Shows memory counts, plain `+N` / `-N` visible/full drift suffixes, progress clocks, effective compaction trigger mode, visible and active observation pool pressure, passive/in-flight state, and last worker errors. |
+| `/om:status`        | Shows memory counts, plain `+N` / `-N` visible/full drift suffixes, progress clocks, visible and active observation pool pressure, passive/in-flight state, and last worker errors. |
 | `/om:view`          | Shows current visible memory and attempts to copy the rendered memory text to the clipboard.                                                   |
 | `/om:view full`     | Shows the full current memory state for the branch and attempts to copy the rendered memory text to the clipboard.                             |
 | `recall` agent tool | Recovers source evidence for a 12-character observation/reflection id on the current branch. It is not semantic search or a transcript browser. |
 
-`/om:view` copies only the rendered memory content. The success/failure line shown in Pi is not included in the clipboard text. If clipboard support is unavailable, the command still prints the memory view and shows a warning. Visible structured memory is empty before the first V3 compaction and after a latest native compaction because no current `om.folded` details are in active context. `/om:view full` still shows durable branch memory.
+`/om:view` copies only the rendered memory content. The success/failure line shown in Pi is not included in the clipboard text. If clipboard support is unavailable, the command still prints the memory view and shows a warning. Before the first V3 compaction, visible memory can be empty because nothing has been folded into `om.folded` details; use `/om:view full` to inspect recorded branch memory.
 
 ---
 
@@ -359,23 +336,14 @@ flowchart TD
     Turn[turn_end]
     Observe[Capture observations]
     Reflect[Distill reflections]
-    AgentEnd[agent_end]
-    Trigger[agentEnd compaction trigger]
-    Between[betweenTurns boundary trigger]
-    Native[Pi native/manual compaction]
+    AgentSettled[agent_settled]
+    Trigger[auto-compaction trigger]
     Compact[session_before_compact]
-    Authority{Coverage reaches prune boundary?}
-    Summary[render prepared OM memory]
-    Delegate[delegate to Pi compaction pipeline]
+    Summary[visible memory for Pi]
 
     Turn -->|observation due| Observe
     Turn -->|reflection due| Reflect
-    Turn -->|tool-bearing, due, effective trigger betweenTurns| Between --> Compact
-    AgentEnd -->|compactAfterTokens and effective trigger agentEnd| Trigger --> Compact
-    Native --> Compact
-    Compact --> Authority
-    Authority -->|yes| Summary
-    Authority -->|no| Delegate
+    AgentSettled -->|compactAfterTokens and idle| Trigger --> Compact --> Summary
 ```
 
 The high-level lifecycle:
@@ -383,12 +351,16 @@ The high-level lifecycle:
 1. Pi session continues normally.
 2. The extension captures observations from the session as work happens.
 3. Durable reflections are distilled in the background.
-4. When compaction time arrives, the extension checks whether Observation Coverage reaches the Pruned Source Boundary.
-5. Covered source uses the prepared OM summary. Uncovered source delegates to Pi's compaction pipeline.
-6. With `betweenTurns`, one successful feature-triggered compaction sends a hidden one-shot continuation signal in the same session.
-7. The agent continues with covered memory or a native summary plus the kept tail.
+4. When compaction time arrives, Pi receives prepared memory quickly.
+5. The agent continues with a compact but useful view of the work so far.
 
-The important part: prepared memory stays fast without letting incomplete coverage suppress Pi's fallback.
+The important part: compaction does not need to rethink the whole session from scratch.
+
+The proactive compaction threshold counts estimated source-entry tokens after
+the latest compaction boundary. It includes source entries retained by
+`firstKeptEntryId` and newer source entries, while memory ledger entries and
+compaction metadata contribute zero. `/om:status` uses the same metric. Pi's
+own window-pressure compaction remains independent.
 
 ---
 
@@ -398,11 +370,10 @@ Current behavior:
 
 * **Observation-centered memory.** The extension records useful session observations while you work.
 * **Durable reflections.** The extension distills stable facts that help the agent stay oriented over time.
-* **Coverage-gated compaction.** `session_before_compact` never waits for background workers. Covered source renders prepared memory without a model call; uncovered source delegates to Pi's compaction pipeline.
-* **Opt-in between-turn continuation.** A due tool-bearing turn can compact and resume automatically in the same session; terminal turns and Pi-owned threshold or overflow compaction add no continuation signal.
+* **Fast, coverage-gated compaction.** `session_before_compact` renders prepared memory without a model only when the returned projection contains observation records covering the source Pi will prune. Otherwise Pi's native summarizer owns compaction. Durable Empty observer progress advances scheduling but does not prove replacement completeness.
 * **Background memory work.** Observation and reflection work run from `turn_end` when their token clocks are due; dropper work runs only after successful reflection and prunes the folded active observation ledger toward `observationsPoolTargetTokens`.
 * **Source-backed recall.** Observations and reflections can be traced back through the `recall` tool.
-* **Visible/full views.** `/om:view` shows structured memory from the latest OM compaction; it is empty after a latest native compaction. `/om:view full` still shows durable branch memory. Use `/om:status` for drift and the separate visible versus active observation pools.
+* **Visible/full views.** `/om:view` shows visible memory and `/om:view full` shows the full current memory state. Use `/om:status` for visible-vs-full drift and for the separate visible observation pool vs active observation pool.
 * **No V2 compatibility layer.** Old V2 settings and memory entries are ignored rather than migrated.
 
 ---
@@ -422,7 +393,7 @@ What this means in practice:
 | V2 setting                   | V3 setting                                              | What to do                                                                                                                                     |
 | ---------------------------- | ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | `observationThresholdTokens` | `observeAfterTokens`                                    | Rename. Same rough role: observation cadence based on raw/source tokens.                                                                       |
-| `compactionThresholdTokens`  | `compactAfterTokens`                                    | Rename. Same rough role when the effective `compactionTrigger` is `agentEnd` or `betweenTurns`; native timing uses Pi's top-level `compaction` settings.       |
+| `compactionThresholdTokens`  | `compactAfterTokens`                                    | Rename. Same rough role: proactive compaction cadence.                                                                                         |
 | `reflectionThresholdTokens`  | `reflectAfterTokens`, `observationsPoolMaxTokens`, and/or `observationsPoolTargetTokens` | Split. Use `reflectAfterTokens` for reflection scheduling, `observationsPoolMaxTokens` for compaction full-fold pressure, and `observationsPoolTargetTokens` for dropper active observation maintenance. |
 | `compactionModel`            | `model`                                                 | Move `{ provider, id }` to `model`.                                                                                                            |
 | `thinkingLevel`              | `model.thinking`                                        | Move under `model`.                                                                                                                            |
@@ -459,7 +430,6 @@ V3 equivalent:
     "observeAfterTokens": 10000,
     "reflectAfterTokens": 20000,
     "compactAfterTokens": 81000,
-    "compactionTrigger": "auto",
     "observationsPoolMaxTokens": 20000,
     "observationsPoolTargetTokens": 10000,
     "agentMaxTurns": 12,
@@ -480,6 +450,7 @@ V3 equivalent:
 * [`docs/concepts.md`](docs/concepts.md) — vocabulary and V3 mental model.
 * [`docs/how-it-works.md`](docs/how-it-works.md) — lifecycle, memory shapes, projections, and recall flow.
 * [`docs/configuration.md`](docs/configuration.md) — all V3 settings and migration notes.
+* [`docs/publication.md`](docs/publication.md) — source-only installation and deferred release work.
 
 ---
 

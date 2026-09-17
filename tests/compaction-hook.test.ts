@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { registerCompactionHook } from "../src/hooks/compaction-hook.js";
-import { Runtime } from "../src/runtime.js";
 import {
 	compactionEntry,
 	memoryDetails,
@@ -17,144 +16,53 @@ import {
 	type TestEntry,
 } from "./fixtures/session.js";
 
-type HookApi = Parameters<typeof registerCompactionHook>[0];
-type HookHandler = Parameters<HookApi["on"]>[1];
-type HookContext = Parameters<HookHandler>[1];
-type HookResult = Awaited<ReturnType<HookHandler>>;
-
-function requireCompaction(result: HookResult) {
-	if (!result.compaction) {
-		throw new Error("expected observational-memory compaction");
-	}
-	return result.compaction;
-}
-
 function setup(args: { entries: TestEntry[]; observationsPoolMaxTokens?: number; compactHookInFlight?: boolean }) {
-	let handler: HookHandler | undefined;
-	const pi: HookApi = {
-		on: vi.fn((eventName, callback) => {
+	let handler: ((event: unknown, ctx: unknown) => Promise<unknown>) | undefined;
+	const pi = {
+		on: vi.fn((eventName: string, cb: typeof handler) => {
 			expect(eventName).toBe("session_before_compact");
-			handler = callback;
+			handler = cb;
 		}),
+		appendEntry: vi.fn(),
 	};
-	const runtime = new Runtime();
-	runtime.config = {
-		...runtime.config,
-		observationsPoolMaxTokens: args.observationsPoolMaxTokens ?? 20_000,
+	const runtime = {
+		config: {
+			observationsPoolMaxTokens: args.observationsPoolMaxTokens ?? 20_000,
+		},
+		compactHookInFlight: args.compactHookInFlight ?? false,
+		observerPromise: new Promise(() => {}),
+		resolveModel: vi.fn(() => {
+			throw new Error("resolveModel must not be called");
+		}),
+		ensureConfig: vi.fn(),
 	};
-	runtime.configLoaded = true;
-	runtime.compactHookInFlight = args.compactHookInFlight ?? false;
-	vi.spyOn(runtime, "resolveModel");
-	registerCompactionHook(pi, runtime);
+	registerCompactionHook(pi as any, runtime as any);
 	if (!handler) throw new Error("compaction handler was not registered");
-	const registeredHandler = handler;
-	const ctx: HookContext = {
+	const ctx = {
 		cwd: "/tmp/project",
 		hasUI: true,
 		ui: { notify: vi.fn() },
-		sessionManager: {
-			getSessionId: () => "test-session",
-			getSessionFile: () => "/tmp/test-session.jsonl",
-		},
+		sessionManager: { getBranch: vi.fn(() => args.entries) },
 	};
-	const run = (firstKeptEntryId = args.entries.at(-1)?.id ?? "missing") => registeredHandler({
+	const run = (firstKeptEntryId = args.entries.at(-1)?.id ?? "missing") => handler!({
 		preparation: { firstKeptEntryId, tokensBefore: 123 },
 		branchEntries: args.entries,
+		signal: undefined,
 	}, ctx);
-	return { runtime, ctx, run };
+	return { pi, runtime, ctx, run };
 }
 
 describe("V3 compaction hook", () => {
-	it("relinquishes authority when fresh source is uncovered", async () => {
-		const entries = [
-			textCustomMessage("raw-1", "aaaa"),
-			textCustomMessage("raw-2", "bbbb"),
-		];
-		const { run, runtime } = setup({ entries });
+	it("delegates to native compaction when there is no V3 memory", async () => {
+		const entries = [textCustomMessage("raw-1", "aaaa")];
+		const { run, runtime, pi } = setup({ entries });
 
-		const result = await run("raw-2");
+		const result = await run("raw-1");
 
-		expect(result).toEqual({});
+		expect(result).toBeUndefined();
 		expect(runtime.resolveModel).not.toHaveBeenCalled();
+		expect(pi.appendEntry).not.toHaveBeenCalled();
 		expect(runtime.compactHookInFlight).toBe(false);
-	});
-
-	it.each([
-		{
-			name: "partial coverage",
-			entries: [
-				textCustomMessage("raw-1", "aaaa"),
-				textCustomMessage("raw-2", "bbbb"),
-				textCustomMessage("raw-3", "cccc"),
-				observationsRecordedEntry("om-partial", {
-					observations: [observation("aaaaaaaaaaaa", { sourceEntryIds: ["raw-1"] })],
-					coversUpToId: "raw-1",
-				}),
-			],
-			firstKeptEntryId: "raw-3",
-		},
-		{
-			name: "Failed or absent coverage",
-			entries: [textCustomMessage("raw-1", "aaaa"), textCustomMessage("raw-2", "bbbb")],
-			firstKeptEntryId: "raw-2",
-		},
-		{
-			name: "malformed Empty coverage",
-			entries: [
-				textCustomMessage("raw-1", "aaaa"),
-				observerCompletedEntry("om-malformed", { outcome: "empty", coversUpToId: "raw-1" }, {
-					data: { outcome: "recorded", coversUpToId: "raw-1" },
-				}),
-				textCustomMessage("raw-2", "bbbb"),
-			],
-			firstKeptEntryId: "raw-2",
-		},
-		{
-			name: "orphaned coverage",
-			entries: [
-				textCustomMessage("raw-1", "aaaa"),
-				observerCompletedEntry("om-orphan", { outcome: "empty", coversUpToId: "missing" }),
-				textCustomMessage("raw-2", "bbbb"),
-			],
-			firstKeptEntryId: "raw-2",
-		},
-		{
-			name: "non-source coverage",
-			entries: [
-				textCustomMessage("raw-1", "aaaa"),
-				oldV2ObservationEntry("metadata-boundary"),
-				observerCompletedEntry("om-non-source", { outcome: "empty", coversUpToId: "metadata-boundary" }),
-				textCustomMessage("raw-2", "bbbb"),
-			],
-			firstKeptEntryId: "raw-2",
-		},
-		{
-			name: "unresolved first-kept boundary",
-			entries: [textCustomMessage("raw-1", "aaaa")],
-			firstKeptEntryId: "missing",
-		},
-	])("relinquishes authority for $name", async ({ entries, firstKeptEntryId }) => {
-		const { run, runtime, ctx } = setup({ entries });
-
-		await expect(run(firstKeptEntryId)).resolves.toEqual({});
-		expect(runtime.compactHookInFlight).toBe(false);
-		expect(ctx.ui.notify).not.toHaveBeenCalled();
-	});
-
-	it("keeps Empty completion metadata out of compaction details and summaries", async () => {
-		const entries = [
-			textCustomMessage("raw-1", "aaaa"),
-			observerCompletedEntry("om-empty", { outcome: "empty", coversUpToId: "raw-1" }),
-			textCustomMessage("raw-2", "bbbb"),
-		];
-		const { run } = setup({ entries });
-
-		const compaction = requireCompaction(await run("raw-2"));
-
-		expect(compaction).toMatchObject({
-			details: { observations: [], reflections: [] },
-			summary: "",
-		});
 	});
 
 	it("first normal compaction writes covered observations without orphan reflections", async () => {
@@ -168,13 +76,13 @@ describe("V3 compaction hook", () => {
 		];
 		const { run } = setup({ entries, observationsPoolMaxTokens: 100 });
 
-		const compaction = requireCompaction(await run("raw-2"));
+		const result = await run("raw-2") as any;
 
-		expect(compaction.details.fullFold).toBe(false);
-		expect(compaction.details.observations.map((obs) => obs.id)).toEqual(["aaaaaaaaaaaa"]);
-		expect(compaction.details.reflections).toEqual([]);
-		expect(compaction.summary).toContain("## Observations");
-		expect(compaction.summary).not.toContain("## Reflections");
+		expect(result.compaction.details.fullFold).toBe(false);
+		expect(result.compaction.details.observations.map((obs: any) => obs.id)).toEqual(["aaaaaaaaaaaa"]);
+		expect(result.compaction.details.reflections).toEqual([]);
+		expect(result.compaction.summary).toContain("## Observations");
+		expect(result.compaction.summary).not.toContain("## Reflections");
 	});
 
 	it("writes a normal V3 projection without applying new reflections or drops", async () => {
@@ -194,13 +102,13 @@ describe("V3 compaction hook", () => {
 		];
 		const { run } = setup({ entries, observationsPoolMaxTokens: 100 });
 
-		const compaction = requireCompaction(await run("raw-2"));
+		const result = await run("raw-2") as any;
 
-		expect(compaction.details).toMatchObject({ type: "om.folded", version: 1, fullFold: false });
-		expect(compaction.details.observations.map((obs) => obs.id)).toEqual(["aaaaaaaaaaaa", "bbbbbbbbbbbb"]);
-		expect(compaction.details.reflections.map((ref) => ref.id)).toEqual(["eeeeeeeeeeee"]);
-		expect(compaction.summary).toContain("## Reflections\n[eeeeeeeeeeee]");
-		expect(compaction.summary).toContain("## Observations");
+		expect(result.compaction.details).toMatchObject({ type: "om.folded", version: 1, fullFold: false });
+		expect(result.compaction.details.observations.map((obs: any) => obs.id)).toEqual(["aaaaaaaaaaaa", "bbbbbbbbbbbb"]);
+		expect(result.compaction.details.reflections.map((ref: any) => ref.id)).toEqual(["eeeeeeeeeeee"]);
+		expect(result.compaction.summary).toContain("## Reflections\n[eeeeeeeeeeee]");
+		expect(result.compaction.summary).toContain("## Observations");
 	});
 
 	it("writes a full V3 projection when observation pool pressure reaches the threshold", async () => {
@@ -220,46 +128,115 @@ describe("V3 compaction hook", () => {
 		];
 		const { run } = setup({ entries, observationsPoolMaxTokens: 100 });
 
-		const compaction = requireCompaction(await run("raw-2"));
+		const result = await run("raw-2") as any;
 
-		expect(compaction.details.fullFold).toBe(true);
-		expect(compaction.details.observations.map((obs) => obs.id)).toEqual(["bbbbbbbbbbbb"]);
-		expect(compaction.details.reflections.map((ref) => ref.id)).toEqual(["eeeeeeeeeeee", "ffffffffffff"]);
+		expect(result.compaction.details.fullFold).toBe(true);
+		expect(result.compaction.details.observations.map((obs: any) => obs.id)).toEqual(["bbbbbbbbbbbb"]);
+		expect(result.compaction.details.reflections.map((ref: any) => ref.id)).toEqual(["eeeeeeeeeeee", "ffffffffffff"]);
 	});
 
-	it("ignores old V2 memory entries and details", async () => {
+	it("delegates when a cross-boundary covering batch is absent from the replacement", async () => {
+		const entries = [
+			textCustomMessage("raw-1", "pruned source"),
+			textCustomMessage("raw-2", "first kept source"),
+			textCustomMessage("raw-3", "later source"),
+			observationsRecordedEntry("om-cross-boundary", {
+				observations: [observation("aaaaaaaaaaaa", { sourceEntryIds: ["raw-1"] })],
+				coversUpToId: "raw-3",
+			}),
+		];
+		const { run } = setup({ entries });
+
+		await expect(run("raw-2")).resolves.toBeUndefined();
+	});
+
+	it("delegates stale non-empty memory when the covering batch is absent from the replacement", async () => {
+		const staleObservation = observation("aaaaaaaaaaaa", { sourceEntryIds: ["raw-old"] });
+		const neededObservation = observation("bbbbbbbbbbbb", { sourceEntryIds: ["raw-1"] });
+		const entries = [
+			textCustomMessage("raw-old", "older source"),
+			observationsRecordedEntry("om-stale", {
+				observations: [staleObservation],
+				coversUpToId: "raw-old",
+			}),
+			textCustomMessage("raw-1", "pruned source"),
+			textCustomMessage("raw-2", "first kept source"),
+			textCustomMessage("raw-3", "later source"),
+			observationsRecordedEntry("om-cross-boundary", {
+				observations: [neededObservation],
+				coversUpToId: "raw-3",
+			}),
+		];
+		const { run } = setup({ entries });
+
+		await expect(run("raw-2")).resolves.toBeUndefined();
+	});
+
+	it("does not treat durable Empty scheduling progress as replacement completeness", async () => {
+		const staleObservation = observation("aaaaaaaaaaaa", { sourceEntryIds: ["raw-old"] });
+		const entries = [
+			textCustomMessage("raw-old", "older source"),
+			observationsRecordedEntry("om-stale", {
+				observations: [staleObservation],
+				coversUpToId: "raw-old",
+			}),
+			textCustomMessage("raw-1", "new source to prune"),
+			observerCompletedEntry("om-empty", { outcome: "empty", coversUpToId: "raw-1" }),
+			textCustomMessage("raw-2", "first kept source"),
+		];
+		const { run } = setup({ entries });
+
+		await expect(run("raw-2")).resolves.toBeUndefined();
+	});
+
+	it("allows observational memory after native compaction when fresh coverage is projected", async () => {
+		const staleObservation = observation("aaaaaaaaaaaa", { sourceEntryIds: ["raw-old"] });
+		const freshObservation = observation("bbbbbbbbbbbb", { sourceEntryIds: ["raw-new"] });
+		const entries = [
+			textCustomMessage("raw-old", "older source"),
+			observationsRecordedEntry("om-old", {
+				observations: [staleObservation],
+				coversUpToId: "raw-old",
+			}),
+			compactionEntry("cmp-native", { firstKeptEntryId: "raw-old" }),
+			textCustomMessage("raw-new", "new source to prune"),
+			observationsRecordedEntry("om-new", {
+				observations: [freshObservation],
+				coversUpToId: "raw-new",
+			}),
+			textCustomMessage("raw-kept", "first kept source"),
+		];
+		const { run } = setup({ entries });
+
+		const result = await run("raw-kept") as any;
+
+		expect(result.compaction.details.observations).toContainEqual(freshObservation);
+		expect(result.compaction.summary).toContain("bbbbbbbbbbbb");
+	});
+
+	it("delegates to native compaction when only old V2 memory exists", async () => {
 		const entries = [
 			textCustomMessage("raw-1", "aaaa"),
 			oldV2ObservationEntry("v2-obs"),
 			compactionEntry("cmp-v2", { firstKeptEntryId: "raw-1", details: oldV2CompactionDetails() }),
-			observerCompletedEntry("om-empty", { outcome: "empty", coversUpToId: "raw-1" }),
-			textCustomMessage("raw-2", "bbbb"),
 		];
 		const { run } = setup({ entries });
 
-		const compaction = requireCompaction(await run("raw-2"));
+		const result = await run("cmp-v2");
 
-		expect(compaction.details).toMatchObject({
-			type: "om.folded",
-			observations: [],
-			reflections: [],
-		});
+		expect(result).toBeUndefined();
 	});
 
 	it("does not wait for worker promises or call model resolution", async () => {
-		const entries = [
-			textCustomMessage("raw-1", "aaaa"),
-			observerCompletedEntry("om-empty", { outcome: "empty", coversUpToId: "raw-1" }),
-			textCustomMessage("raw-2", "bbbb"),
-		];
+		const entries = [textCustomMessage("raw-1", "aaaa")];
 		const { run, runtime } = setup({ entries });
 
 		const result = await Promise.race([
-			run("raw-2"),
+			run("raw-1"),
 			new Promise((_, reject) => setTimeout(() => reject(new Error("timed out")), 50)),
 		]);
 
-		expect(result).toMatchObject({ compaction: { details: { type: "om.folded" } } });
+		expect(result).toBeUndefined();
 		expect(runtime.resolveModel).not.toHaveBeenCalled();
 	});
 

@@ -1,4 +1,4 @@
-/** Durable metadata for an Empty observer outcome. */
+/** Durable scheduling progress for a successful observer run with no new facts. */
 export const OM_OBSERVER_COMPLETED = "om.observer.completed";
 export const OM_OBSERVATIONS_RECORDED = "om.observations.recorded";
 export const OM_REFLECTIONS_RECORDED = "om.reflections.recorded";
@@ -40,7 +40,7 @@ export type Reflection = {
 	tokenCount: number;
 };
 
-/** Validated payload for an Empty observer completion marker. */
+/** Ledger payload for an explicit successful observer run with no new facts. */
 export interface ObserverCompletedEntryData {
 	outcome: "empty";
 	coversUpToId: string;
@@ -74,7 +74,7 @@ export type V3MemoryCustomType =
 	| typeof OM_REFLECTIONS_RECORDED
 	| typeof OM_OBSERVATIONS_DROPPED;
 
-/** Custom entry types that can carry a durable branch coverage boundary. */
+/** Ledger entry kinds that advance a source coverage clock. */
 export type CoverageCustomType = V3MemoryCustomType | typeof OM_OBSERVER_COMPLETED;
 
 export function isRelevance(value: unknown): value is Relevance {
@@ -124,11 +124,9 @@ export function isReflection(value: unknown): value is Reflection {
 	);
 }
 
-/** Returns whether a value is a valid Empty observer completion payload. */
+/** Returns whether a value is a valid explicit Empty observer result. */
 export function isObserverCompletedData(value: unknown): value is ObserverCompletedEntryData {
-	if (!isPlainRecord(value)) {
-		return false;
-	}
+	if (!isPlainRecord(value)) return false;
 	return value.outcome === "empty" && isNonEmptyString(value.coversUpToId);
 }
 
@@ -170,7 +168,7 @@ export function isMemoryDetails(value: unknown): value is MemoryDetails {
 	);
 }
 
-/** Returns whether an entry is a validated Empty observer completion marker. */
+/** Returns whether an entry records successful observer progress without new facts. */
 export function isObserverCompletedEntry(entry: Entry): entry is Entry & {
 	type: "custom";
 	customType: typeof OM_OBSERVER_COMPLETED;
@@ -203,11 +201,9 @@ export function isObservationsDroppedEntry(entry: Entry): entry is Entry & {
 	return entry.type === "custom" && entry.customType === OM_OBSERVATIONS_DROPPED && isObservationsDroppedData(entry.data);
 }
 
-/** Builds an Empty observer completion payload for a covered source boundary. */
+/** Builds a durable explicit Empty marker at a source boundary. */
 export function buildObserverCompletedData(coversUpToId: string): ObserverCompletedEntryData | undefined {
-	if (!isNonEmptyString(coversUpToId)) {
-		return undefined;
-	}
+	if (!isNonEmptyString(coversUpToId)) return undefined;
 	return { outcome: "empty", coversUpToId };
 }
 

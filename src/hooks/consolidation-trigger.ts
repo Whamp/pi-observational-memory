@@ -1,12 +1,16 @@
+import type { Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { runDropper } from "../agents/dropper/agent.js";
 import { observationPoolMetrics } from "../agents/dropper/pool.js";
 import { runObserver } from "../agents/observer/agent.js";
 import { runReflector } from "../agents/reflector/agent.js";
-import { resolveStageModel, type StageName } from "../config.js";
 import { debugLog, withDebugLogContext } from "../debug-log.js";
-import { type Runtime } from "../runtime.js";
+import {
+	resolveObserverChunkMaxTokens,
+	resolveStageModel,
+	type StageName,
+} from "../config.js";
+import type { ResolveResult, Runtime } from "../runtime.js";
 import { serializeSourceAddressedBranchEntries } from "../serialize.js";
 import {
 	OM_OBSERVER_COMPLETED,
@@ -24,27 +28,26 @@ import {
 	latestCoverageMarkerId,
 	latestObservationCoverageIndex,
 	observationToSummaryLine,
+	realTokensSinceAnchor,
+	realTokensSinceObservationCoverage,
 	rawTokensSinceObservationCoverage,
 	rawTokensSinceReflectionCoverage,
 	reflectionToSummaryLine,
 	type Entry,
 	type Reflection,
+	type V3MemoryCustomType,
 } from "../session-ledger/index.js";
 
-type StageResolution = {
-	model: unknown;
-	apiKey?: string;
-	headers?: Record<string, string>;
-	thinking: ModelThinkingLevel;
-};
+type ResolvedModel = Extract<ResolveResult, { ok: true }>;
+type StageResolution = ResolvedModel & { thinking: ModelThinkingLevel };
 
 type ConsolidationCtx = {
-	mode?: string;
 	cwd: string;
 	hasUI: boolean;
 	ui?: { notify: (message: string, type?: "warning" | "info" | "error") => void };
 	model: unknown;
 	modelRegistry: any;
+	getContextUsage?: () => { tokens?: number | null; contextWindow?: number } | undefined;
 	sessionManager: {
 		getBranch: () => unknown;
 		getSessionId?: () => string;
@@ -79,13 +82,57 @@ function mergeReflections(existing: Reflection[], additional: Reflection[]): Ref
 	return merged;
 }
 
-function anyStageDue(entries: Entry[], runtime: Runtime): boolean {
-	return rawTokensSinceObservationCoverage(entries) >= runtime.config.observeAfterTokens
-		|| rawTokensSinceReflectionCoverage(entries) >= runtime.config.reflectAfterTokens;
+/**
+ * Real current context tokens from the session (provider-reported usage, the
+ * same basis the footer percentage uses). Falls back to undefined when the
+ * host pi lacks getContextUsage or the count is unknown (e.g. right after a
+ * compaction, before the next valid assistant response).
+ */
+function realContextTokens(ctx: ConsolidationCtx): number | undefined {
+	const usage = typeof ctx.getContextUsage === "function" ? ctx.getContextUsage() : undefined;
+	const tokens = usage?.tokens;
+	return typeof tokens === "number" && Number.isFinite(tokens) ? tokens : undefined;
+}
+
+function stageDue(
+	entries: Entry[],
+	runtime: Runtime,
+	currentTokens: number | undefined,
+	customType: V3MemoryCustomType,
+	rawEstimateFn: (entries: Entry[]) => number,
+	threshold: number,
+): boolean {
+	if (currentTokens !== undefined) {
+		const real = realTokensSinceAnchor(entries, customType, currentTokens);
+		if (real !== undefined) return real >= threshold;
+	}
+	// Real delta unmeasurable (no usage baseline, or accounting basis changed) or
+	// old pi host without getContextUsage — fall back to the raw estimate, which
+	// self-limits after coverage and cannot over-fire or starve.
+	return rawEstimateFn(entries) >= threshold;
+}
+
+function anyStageDue(entries: Entry[], runtime: Runtime, currentTokens: number | undefined): boolean {
+	const realObservationTokens = currentTokens === undefined
+		? undefined
+		: realTokensSinceObservationCoverage(entries, currentTokens);
+	const observationTokens = realObservationTokens ?? rawTokensSinceObservationCoverage(entries);
+	return observationTokens >= runtime.config.observeAfterTokens
+		|| stageDue(entries, runtime, currentTokens, OM_REFLECTIONS_RECORDED, rawTokensSinceReflectionCoverage, runtime.config.reflectAfterTokens);
 }
 
 function shouldNotifyWorker(runtime: Runtime, ctx: ConsolidationCtx): boolean {
 	return runtime.config.showWorkerNotifications && ctx.hasUI;
+}
+
+function isApprovedOpenCodeHostname(baseUrl: string | undefined): boolean {
+	if (!baseUrl || !URL.canParse(baseUrl)) return false;
+	const hostname = new URL(baseUrl).hostname.toLowerCase();
+	return hostname === "opencode.ai" || hostname.endsWith(".opencode.ai");
+}
+
+function shouldSendOpenCodeRoutingHeaders(model: { baseUrl?: string }): boolean {
+	return isApprovedOpenCodeHostname(model.baseUrl);
 }
 
 function makeModelResolver(runtime: Runtime, ctx: ConsolidationCtx): (stage: StageName) => Promise<StageResolution | undefined> {
@@ -100,34 +147,33 @@ function makeModelResolver(runtime: Runtime, ctx: ConsolidationCtx): (stage: Sta
 			hasUI: ctx.hasUI,
 			ui: ctx.ui,
 		}, desired.model);
-		if (!resolved.ok) {
-			debugLog(`${stage}.model_unavailable`, { reason: resolved.reason });
-			if (!runtime.resolveFailureNotified && ctx.hasUI && ctx.ui) {
-				ctx.ui.notify(`Observational memory: ${stage} skipped — ${resolved.reason}`, "warning");
-				runtime.resolveFailureNotified = true;
+		if (resolved.ok) {
+			runtime.resolveFailureNotified = false;
+			let result: StageResolution = { ...resolved, thinking: desired.thinking };
+			const model = (resolved.model ?? {}) as { provider?: string; baseUrl?: string };
+			if (shouldSendOpenCodeRoutingHeaders(model)) {
+				const sessionId = ctx.sessionManager.getSessionId?.();
+				if (sessionId) {
+					result = {
+						...result,
+						headers: {
+							...resolved.headers,
+							"x-opencode-session": sessionId,
+							"x-opencode-client": "pi",
+						},
+					};
+				}
 			}
-			return undefined;
+			cache.set(stage, result);
+			return result;
 		}
-		const result: StageResolution = {
-			model: resolved.model,
-			apiKey: resolved.apiKey,
-			headers: resolved.headers,
-			thinking: desired.thinking,
-		};
-		cache.set(stage, result);
-		runtime.resolveFailureNotified = false;
-		return result;
+		debugLog(`${stage}.model_unavailable`, { reason: resolved.reason });
+		if (!runtime.resolveFailureNotified && ctx.hasUI && ctx.ui) {
+			ctx.ui.notify(`Observational memory: ${stage} skipped — ${resolved.reason}`, "warning");
+			runtime.resolveFailureNotified = true;
+		}
+		return undefined;
 	};
-}
-
-function shouldFlushConsolidationOnShutdown(ctx: ConsolidationCtx): boolean {
-	return ctx.mode === "print" || ctx.mode === "json";
-}
-
-async function waitForPendingConsolidation(runtime: Runtime): Promise<void> {
-	const pending = runtime.consolidationPromise;
-	if (!pending) return;
-	await pending.catch(() => undefined);
 }
 
 export function registerConsolidationTrigger(pi: ExtensionAPI, runtime: Runtime): void {
@@ -136,12 +182,6 @@ export function registerConsolidationTrigger(pi: ExtensionAPI, runtime: Runtime)
 	};
 	pi.on("agent_start", launch);
 	pi.on("turn_end", launch);
-	pi.on("session_shutdown", async (_event: unknown, ctx: ConsolidationCtx) => {
-		// Print/json mode disposes the session as soon as the prompt returns; wait while
-		// pi.appendEntry is still valid so memory entries are not lost as stale-context errors.
-		if (!shouldFlushConsolidationOnShutdown(ctx)) return;
-		await waitForPendingConsolidation(runtime);
-	});
 }
 
 function debugSessionMetadata(ctx: ConsolidationCtx): { sessionId?: string; sessionFile?: string } {
@@ -150,7 +190,8 @@ function debugSessionMetadata(ctx: ConsolidationCtx): { sessionId?: string; sess
 			sessionId: ctx.sessionManager.getSessionId?.(),
 			sessionFile: ctx.sessionManager.getSessionFile?.(),
 		};
-	} catch {
+	} catch (error) {
+		debugLog("session.metadata_failed", { error: String(error) });
 		return {};
 	}
 }
@@ -161,7 +202,7 @@ function maybeLaunchConsolidation(pi: ExtensionAPI, runtime: Runtime, ctx: Conso
 	if (runtime.consolidationInFlight) return;
 
 	const entries = ctx.sessionManager.getBranch() as Entry[];
-	if (!anyStageDue(entries, runtime)) return;
+	if (!anyStageDue(entries, runtime, realContextTokens(ctx))) return;
 
 	const runId = `consolidation-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`;
 	const consolidationCtx: ConsolidationCtx = {
@@ -170,6 +211,7 @@ function maybeLaunchConsolidation(pi: ExtensionAPI, runtime: Runtime, ctx: Conso
 		ui: ctx.ui,
 		model: ctx.model,
 		modelRegistry: ctx.modelRegistry,
+		getContextUsage: ctx.getContextUsage,
 		sessionManager: ctx.sessionManager,
 	};
 
@@ -225,27 +267,59 @@ async function runObserverStage(
 	resolveModel: (stage: "observer") => Promise<StageResolution | undefined>,
 ): Promise<StageOutcome> {
 	const entries = ctx.sessionManager.getBranch() as Entry[];
-	const tokens = rawTokensSinceObservationCoverage(entries);
+	const currentTokens = realContextTokens(ctx);
+	const real = currentTokens === undefined
+		? undefined
+		: realTokensSinceObservationCoverage(entries, currentTokens);
+	const tokens = real ?? rawTokensSinceObservationCoverage(entries);
 	if (tokens < runtime.config.observeAfterTokens) return "continue";
 
+	// Resolve the model before building the chunk: the default chunk cap
+	// derives from the resolved model's context window.
+	const resolved = await resolveModel("observer");
+	if (!resolved) return "abort";
+
 	const lastCoverageIdx = latestObservationCoverageIndex(entries);
-	const chunkEntries = sourceEntriesAfter(entries, lastCoverageIdx);
-	const coversUpToId = chunkEntries.at(-1)?.id;
+	const backlogEntries = sourceEntriesAfter(entries, lastCoverageIdx);
+
+	// Budget the text that is actually sent to the observer, including source
+	// labels and rendered message content. Complete entries are kept intact.
+	// Only a first entry that cannot fit by itself is represented by a clearly
+	// marked head/tail excerpt; the original ledger entry remains untouched.
+	const contextWindow = (resolved.model as { contextWindow?: number }).contextWindow;
+	const maxChunkTokens = resolveObserverChunkMaxTokens(runtime.config, contextWindow);
+	const {
+		text: chunk,
+		sourceEntryIds,
+		estimatedTokens: chunkTokens,
+		truncatedSourceEntryIds,
+	} = serializeSourceAddressedBranchEntries(backlogEntries, { maxTokens: maxChunkTokens });
+	if (!chunk.trim() || sourceEntryIds.length === 0) return "continue";
+	const coversUpToId = sourceEntryIds.at(-1);
 	if (!coversUpToId) return "continue";
 
-	const { text: chunk, sourceEntryIds } = serializeSourceAddressedBranchEntries(chunkEntries);
-	if (!chunk.trim() || sourceEntryIds.length === 0) return "continue";
+	if (sourceEntryIds.length < backlogEntries.length || truncatedSourceEntryIds.length > 0) {
+		debugLog("observer.chunk_capped", {
+			maxChunkTokens,
+			backlogEntries: backlogEntries.length,
+			backlogTokens: tokens,
+			chunkEntries: sourceEntryIds.length,
+			chunkTokens,
+			truncatedSourceEntryIds,
+		});
+	}
 
 	const memory = fullProjection(entries);
 	const priorReflections = memory.reflections.map(reflectionToSummaryLine);
 	const priorObservations = memory.observations.map(observationToSummaryLine);
 
 	if (shouldNotifyWorker(runtime, ctx)) ctx.ui?.notify(
-		`Observational memory: observer running on ~${tokens.toLocaleString()}-token chunk`,
+		`Observational memory: observer running on ~${chunkTokens.toLocaleString()}-token chunk`,
 		"info",
 	);
 	debugLog("observer.start", {
 		tokens,
+		chunkTokens,
 		coversUpToId,
 		sourceEntryIds,
 		sourceEntryCount: sourceEntryIds.length,
@@ -253,46 +327,36 @@ async function runObserverStage(
 		priorObservations: priorObservations.length,
 	});
 
-	const resolved = await resolveModel("observer");
-	if (!resolved) return "abort";
-
 	const result = await runObserver({
-		model: resolved.model as any,
+		model: resolved.model as Model<any>,
 		apiKey: resolved.apiKey,
 		headers: resolved.headers,
+		env: resolved.env,
 		priorReflections,
 		priorObservations,
 		chunk,
 		allowedSourceEntryIds: sourceEntryIds,
 		maxTurns: runtime.config.agentMaxTurns,
+		maxOutputTokens: runtime.config.agentMaxTokens,
 		thinkingLevel: resolved.thinking,
+		modelRegistry: ctx.modelRegistry,
 	});
-
 	if (result.outcome === "failed") {
-		if (result.reason === "rejected_proposals") {
-			debugLog("observer.failed.rejected_proposals", { coversUpToId, rejectedCount: result.rejectedCount });
-			const message = `observer rejected ${result.rejectedCount} proposal${result.rejectedCount === 1 ? "" : "s"}`;
-			runtime.recordConsolidationStageError(ctx, "observer", new Error(message));
-		} else {
-			debugLog("observer.failed.no_structured_outcome", { coversUpToId });
-			runtime.recordConsolidationStageError(ctx, "observer", new Error("observer reported no structured outcome"));
-		}
+		const error = result.reason === "rejected_proposals"
+			? new Error(`observer rejected ${result.rejectedCount} proposal${result.rejectedCount === 1 ? "" : "s"}`)
+			: new Error("observer reported no structured outcome");
+		debugLog(`observer.failed.${result.reason}`, { coversUpToId });
+		runtime.recordConsolidationStageError(ctx, "observer", error);
 		return "continue";
 	}
-
 	if (result.outcome === "empty") {
 		const data = buildObserverCompletedData(coversUpToId);
-		if (!data) {
-			return "continue";
-		}
+		if (!data) return "continue";
 		appendEntry(pi, OM_OBSERVER_COMPLETED, data);
 		runtime.lastObserverError = undefined;
 		debugLog("observer.empty.appended", { coversUpToId });
 		if (shouldNotifyWorker(runtime, ctx)) {
-			ctx.ui?.notify(
-				"Observational memory: observer found no new observations",
-				"info",
-			);
+			ctx.ui?.notify("Observational memory: observer found no new observations", "info");
 		}
 		return "continue";
 	}
@@ -321,7 +385,9 @@ async function runReflectorStage(
 	resolveModel: (stage: "reflector") => Promise<StageResolution | undefined>,
 ): Promise<ReflectorStageResult> {
 	const entries = ctx.sessionManager.getBranch() as Entry[];
-	const reflectionTokens = rawTokensSinceReflectionCoverage(entries);
+	const currentTokens = realContextTokens(ctx);
+	const real = currentTokens !== undefined ? realTokensSinceAnchor(entries, OM_REFLECTIONS_RECORDED, currentTokens) : undefined;
+	const reflectionTokens = real !== undefined ? real : rawTokensSinceReflectionCoverage(entries); // fallback: no usage baseline / basis change
 	if (reflectionTokens < runtime.config.reflectAfterTokens) return { outcome: "continue", sameRunReflections: [] };
 
 	const observationCoverageId = latestCoverageMarkerId(entries, OM_OBSERVATIONS_RECORDED);
@@ -336,13 +402,16 @@ async function runReflectorStage(
 
 	const folded = foldLedger(entries);
 	const reflections = await runReflector({
-		model: resolved.model as any,
+		model: resolved.model as Model<any>,
 		apiKey: resolved.apiKey,
 		headers: resolved.headers,
+		env: resolved.env,
 		reflections: folded.reflections,
 		observations: folded.activeObservations,
 		maxTurns: runtime.config.agentMaxTurns,
+		maxOutputTokens: runtime.config.agentMaxTokens,
 		thinkingLevel: resolved.thinking,
+		modelRegistry: ctx.modelRegistry,
 	});
 	if (!reflections) return { outcome: "continue", sameRunReflections: [] };
 
@@ -408,14 +477,17 @@ async function runDropperStage(
 
 	const reflectionsForDropper = mergeReflections(folded.reflections, sameRunReflections);
 	const droppedIds = await runDropper({
-		model: resolved.model as any,
+		model: resolved.model as Model<any>,
 		apiKey: resolved.apiKey,
 		headers: resolved.headers,
+		env: resolved.env,
 		reflections: reflectionsForDropper,
 		observations: folded.activeObservations,
 		targetTokens: runtime.config.observationsPoolTargetTokens,
 		maxTurns: runtime.config.agentMaxTurns,
+		maxOutputTokens: runtime.config.agentMaxTokens,
 		thinkingLevel: resolved.thinking,
+		modelRegistry: ctx.modelRegistry,
 	});
 	const coversUpToId = earlierCoverageMarkerId(entries, observationCoverageId, sameRunReflectionCoverageId);
 	const data = coversUpToId && droppedIds ? buildObservationsDroppedData(droppedIds, coversUpToId) : undefined;

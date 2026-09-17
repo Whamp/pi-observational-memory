@@ -8,4 +8,4 @@ Retrying Empty source after a separate attempt watermark would permit reconsider
 
 ## Consequences
 
-An explicit Empty outcome permanently retires its source from future observation, just as a Recorded outcome retires source events that were not selected for memory. Empty creates no fabricated observation records, does not advance reflector or dropper boundaries, and does not block compaction. Failed outcomes remain operationally visible, retry on the next eligible turn, and do not alter compaction policy in this decision.
+An explicit Empty outcome permanently retires its source from future observation, just as a Recorded outcome retires source events that were not selected for memory. Empty creates no fabricated observation records and does not advance reflector or dropper boundaries. It is scheduling evidence, not proof that replacement context covers pruned source, so it does not grant observational memory compaction authority. Failed outcomes remain operationally visible, retry on the next eligible turn, and do not alter compaction policy.

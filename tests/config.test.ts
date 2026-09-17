@@ -1,7 +1,6 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mock = vi.hoisted(() => ({ agentDir: "" }));
@@ -10,7 +9,13 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
 	getAgentDir: () => mock.agentDir,
 }));
 
-import { DEFAULTS, loadConfig, readEnvConfig, resolveCompactAfterTokens, resolveStageModel, resolveStageModelConfig, resolveStageThinking, type Config } from "../src/config.js";
+import {
+	DEFAULTS,
+	loadConfig,
+	readEnvConfig,
+	resolveCompactAfterTokens,
+	resolveStageModel,
+} from "../src/config.js";
 
 function writeJson(path: string, value: unknown) {
 	mkdirSync(join(path, ".."), { recursive: true });
@@ -45,7 +50,8 @@ describe("V3 config", () => {
 			observationsPoolMaxTokens: 20000,
 			observationsPoolTargetTokens: 10000,
 			agentMaxTurns: 16,
-			compactionTrigger: "auto",
+			agentMaxTokens: 32000,
+			compactionTrigger: "agentSettled",
 			showWorkerNotifications: true,
 			passive: false,
 			debugLog: false,
@@ -62,8 +68,9 @@ describe("V3 config", () => {
 				observationsPoolMaxTokens: 40,
 				observationsPoolTargetTokens: 15,
 				agentMaxTurns: 5,
-				compactionTrigger: "native",
+				agentMaxTokens: 8192,
 				model: { provider: "anthropic", id: "global", thinking: "medium" },
+				showWorkerNotifications: true,
 				passive: false,
 				debugLog: true,
 			},
@@ -72,6 +79,7 @@ describe("V3 config", () => {
 			"observational-memory": {
 				observeAfterTokens: 100,
 				model: { provider: "openai", id: "project", thinking: "low" },
+				showWorkerNotifications: false,
 			},
 		});
 
@@ -82,44 +90,71 @@ describe("V3 config", () => {
 			observationsPoolMaxTokens: 40,
 			observationsPoolTargetTokens: 15,
 			agentMaxTurns: 5,
-			compactionTrigger: "native",
+			agentMaxTokens: 8192,
 			model: { provider: "openai", id: "project", thinking: "low" },
+			showWorkerNotifications: false,
 			passive: true,
 			debugLog: true,
 		});
 	});
 
-	it("loads betweenTurns compaction from global and project settings", () => {
-		writeJson(join(agentDir, "settings.json"), {
-			"observational-memory": {
-				compactionTrigger: "betweenTurns",
-			},
-		});
-
-		expect(loadConfig(cwd, {})).toMatchObject({ compactionTrigger: "betweenTurns" });
-
-		writeJson(join(agentDir, "settings.json"), {
-			"observational-memory": {
-				compactionTrigger: "native",
-			},
-		});
+	it("preserves fork stage model and thinking configuration", () => {
 		writeJson(join(cwd, ".pi", "settings.json"), {
 			"observational-memory": {
-				compactionTrigger: "betweenTurns",
+				model: { provider: "shared", id: "base", thinking: "low" },
+				observer: {
+					model: { provider: "observer-provider", id: "observer-model", thinking: "medium" },
+					thinking: "high",
+				},
+				reflector: { model: { provider: "reflector-provider", id: "reflector-model" } },
+				dropper: { thinking: "max" },
 			},
 		});
 
-		expect(loadConfig(cwd, {})).toMatchObject({ compactionTrigger: "betweenTurns" });
+		const config = loadConfig(cwd, {});
+		expect(resolveStageModel(config, "observer")).toEqual({
+			model: { provider: "observer-provider", id: "observer-model", thinking: "medium" },
+			thinking: "high",
+		});
+		expect(resolveStageModel(config, "reflector")).toEqual({
+			model: { provider: "reflector-provider", id: "reflector-model" },
+			thinking: "low",
+		});
+		expect(resolveStageModel(config, "dropper")).toEqual({
+			model: { provider: "reflector-provider", id: "reflector-model" },
+			thinking: "max",
+		});
 	});
 
-	it("loads the worker notification preference", () => {
+	it.each(["auto", "agentEnd", "betweenTurns"])(
+		"maps legacy fork compaction trigger %s to Pi's settled lifecycle",
+		(compactionTrigger) => {
+			writeJson(join(cwd, ".pi", "settings.json"), {
+				"observational-memory": { compactionTrigger },
+			});
+
+			expect(loadConfig(cwd, {}).compactionTrigger).toBe("agentSettled");
+		},
+	);
+
+	it("keeps explicit native compaction mode", () => {
+		writeJson(join(cwd, ".pi", "settings.json"), {
+			"observational-memory": { compactionTrigger: "native" },
+		});
+
+		expect(loadConfig(cwd, {}).compactionTrigger).toBe("native");
+	});
+
+	it("accepts max as a valid model thinking level", () => {
 		writeJson(join(cwd, ".pi", "settings.json"), {
 			"observational-memory": {
-				showWorkerNotifications: false,
+				model: { provider: "anthropic", id: "claude", thinking: "max" },
 			},
 		});
 
-		expect(loadConfig(cwd, {})).toMatchObject({ showWorkerNotifications: false });
+		expect(loadConfig(cwd, {})).toMatchObject({
+			model: { provider: "anthropic", id: "claude", thinking: "max" },
+		});
 	});
 
 	it("ignores invalid V3 values", () => {
@@ -131,8 +166,8 @@ describe("V3 config", () => {
 				observationsPoolMaxTokens: "20000",
 				observationsPoolTargetTokens: "10000",
 				agentMaxTurns: null,
-				compactionTrigger: "manual",
 				model: { provider: "anthropic", id: "", thinking: "huge" },
+				showWorkerNotifications: "no",
 				passive: "yes",
 				debugLog: "true",
 			},
@@ -292,184 +327,5 @@ describe("V3 config", () => {
 			expect(resolveCompactAfterTokens(config, 0)).toBe(81000);
 			expect(resolveCompactAfterTokens(config, -1)).toBe(81000);
 		});
-	});
-});
-
-function baseConfig(overrides: Partial<Config> = {}): Config {
-	return { ...DEFAULTS, ...overrides };
-}
-
-function sharedModel(thinking?: ModelThinkingLevel): NonNullable<Config["model"]> {
-	return thinking ? { provider: "openai", id: "shared", thinking } : { provider: "openai", id: "shared" };
-}
-
-describe("stage model resolution", () => {
-	it("falls back to the shared model and shared thinking when no stage config is set", () => {
-		const config = baseConfig({ model: sharedModel("medium") });
-		for (const stage of ["observer", "reflector", "dropper"] as const) {
-			expect(resolveStageModel(config, stage)).toEqual({ model: sharedModel("medium"), thinking: "medium" });
-		}
-	});
-
-	it("defaults thinking to low when the shared model has no thinking", () => {
-		const config = baseConfig({ model: sharedModel() });
-		for (const stage of ["observer", "reflector", "dropper"] as const) {
-			expect(resolveStageThinking(config, stage)).toBe("low");
-		}
-		expect(resolveStageModelConfig(config, "observer")).toEqual(sharedModel());
-	});
-
-	it("uses the session model (undefined) when neither stage nor shared model is set", () => {
-		const config = baseConfig();
-		for (const stage of ["observer", "reflector", "dropper"] as const) {
-			expect(resolveStageModelConfig(config, stage)).toBeUndefined();
-			expect(resolveStageThinking(config, stage)).toBe("low");
-		}
-	});
-
-	it("lets observer override thinking while inheriting the shared model", () => {
-		const config = baseConfig({
-			model: sharedModel("medium"),
-			observer: { thinking: "off" },
-		});
-		expect(resolveStageModel(config, "observer")).toEqual({ model: sharedModel("medium"), thinking: "off" });
-		expect(resolveStageModel(config, "reflector")).toEqual({ model: sharedModel("medium"), thinking: "medium" });
-	});
-
-	it("lets a stage override its model", () => {
-		const reflectorModel = { provider: "openrouter", id: "refl", thinking: "high" };
-		const config = baseConfig({
-			model: sharedModel("medium"),
-			reflector: { model: reflectorModel },
-		});
-		expect(resolveStageModelConfig(config, "reflector")).toEqual(reflectorModel);
-		expect(resolveStageModelConfig(config, "observer")).toEqual(sharedModel("medium"));
-		expect(resolveStageModelConfig(config, "dropper")).toEqual(reflectorModel);
-	});
-
-	it("prefers explicit stage thinking over the stage model thinking", () => {
-		const config = baseConfig({
-			model: sharedModel("medium"),
-			reflector: { model: { provider: "openrouter", id: "refl", thinking: "high" }, thinking: "low" },
-		});
-		expect(resolveStageThinking(config, "reflector")).toBe("low");
-	});
-
-	it("falls back to stage model thinking when explicit stage thinking is unset", () => {
-		const config = baseConfig({
-			model: sharedModel("medium"),
-			observer: { model: { provider: "openrouter", id: "om", thinking: "xhigh" } },
-		});
-		expect(resolveStageThinking(config, "observer")).toBe("xhigh");
-	});
-
-	it("dropper inherits reflector model and reflector thinking when dropper config is unset", () => {
-		const reflectorModel = { provider: "openrouter", id: "refl", thinking: "high" };
-		const config = baseConfig({
-			model: sharedModel("medium"),
-			reflector: { model: reflectorModel, thinking: "low" },
-		});
-		expect(resolveStageModelConfig(config, "dropper")).toEqual(reflectorModel);
-		expect(resolveStageThinking(config, "dropper")).toBe("low");
-	});
-
-	it("dropper own override beats inherited reflector values", () => {
-		const config = baseConfig({
-			model: sharedModel("medium"),
-			reflector: { thinking: "high" },
-			dropper: { thinking: "off", model: { provider: "openrouter", id: "drop" } },
-		});
-		expect(resolveStageModelConfig(config, "dropper")).toEqual({ provider: "openrouter", id: "drop" });
-		expect(resolveStageThinking(config, "dropper")).toBe("off");
-	});
-
-	it("dropper model inherits reflector, then shared, then session", () => {
-		const reflectorModel = { provider: "openrouter", id: "refl" };
-		expect(resolveStageModelConfig(baseConfig({ model: sharedModel("medium"), reflector: { model: reflectorModel } }), "dropper")).toEqual(reflectorModel);
-		expect(resolveStageModelConfig(baseConfig({ model: sharedModel("medium") }), "dropper")).toEqual(sharedModel("medium"));
-		expect(resolveStageModelConfig(baseConfig(), "dropper")).toBeUndefined();
-	});
-});
-
-describe("stage config normalization", () => {
-	let root: string;
-	let cwd: string;
-	let agentDir: string;
-
-	beforeEach(() => {
-		root = `${tmpdir()}/om-v3-stage-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-		cwd = join(root, "project");
-		agentDir = join(root, "agent");
-		mkdirSync(cwd, { recursive: true });
-		mkdirSync(agentDir, { recursive: true });
-		mock.agentDir = agentDir;
-	});
-
-	afterEach(() => {
-		rmSync(root, { recursive: true, force: true });
-	});
-
-	it("parses valid stage overrides from project settings", () => {
-		writeJson(join(cwd, ".pi", "settings.json"), {
-			"observational-memory": {
-				model: { provider: "openai", id: "shared", thinking: "medium" },
-				observer: { thinking: "off" },
-				reflector: { model: { provider: "openrouter", id: "refl", thinking: "high" } },
-				dropper: { thinking: "medium" },
-			},
-		});
-
-		expect(loadConfig(cwd, {})).toMatchObject({
-			model: { provider: "openai", id: "shared", thinking: "medium" },
-			observer: { thinking: "off" },
-			reflector: { model: { provider: "openrouter", id: "refl", thinking: "high" } },
-			dropper: { thinking: "medium" },
-		});
-	});
-
-	it("parses max thinking for shared and stage settings", () => {
-		writeJson(join(cwd, ".pi", "settings.json"), {
-			"observational-memory": {
-				model: { provider: "openai", id: "shared", thinking: "max" },
-				observer: { thinking: "max" },
-				reflector: { model: { provider: "openrouter", id: "refl", thinking: "max" } },
-				dropper: { thinking: "max" },
-			},
-		});
-
-		expect(loadConfig(cwd, {})).toMatchObject({
-			model: { provider: "openai", id: "shared", thinking: "max" },
-			observer: { thinking: "max" },
-			reflector: { model: { provider: "openrouter", id: "refl", thinking: "max" } },
-			dropper: { thinking: "max" },
-		});
-	});
-
-	it("ignores invalid stage config shapes", () => {
-		writeJson(join(cwd, ".pi", "settings.json"), {
-			"observational-memory": {
-				observer: "nope",
-				reflector: { model: { provider: "openrouter", id: "" }, thinking: "huge" },
-				dropper: {},
-			},
-		});
-
-		expect(loadConfig(cwd, {})).toEqual(DEFAULTS);
-	});
-
-	it("project stage config overrides global stage config", () => {
-		writeJson(join(agentDir, "settings.json"), {
-			"observational-memory": {
-				observer: { thinking: "off" },
-			},
-		});
-		writeJson(join(cwd, ".pi", "settings.json"), {
-			"observational-memory": {
-				observer: { thinking: "low" },
-			},
-		});
-
-		const config = loadConfig(cwd, {});
-		expect(resolveStageThinking(config, "observer")).toBe("low");
 	});
 });

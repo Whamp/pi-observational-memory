@@ -1,4 +1,8 @@
-# Compose between-turn compaction with nested Pi lifecycle events
+# Superseded: compose between-turn compaction with nested Pi lifecycle events
+
+Status: superseded in the upstream-foundation reconstruction.
+
+The design below is retained as historical rationale, not current behavior. The reconstructed extension uses Pi's native `agent_settled` event for proactive compaction and does not abort between turns, emit hidden continuation messages, or maintain continuation state. Existing `betweenTurns` configuration normalizes to `agentSettled`.
 
 Pi 0.81 manual compaction first aborts the active agent run, while `sendMessage({ triggerTurn: true })` starts a detached nested run after Pi becomes idle. Between-turn compaction therefore composes `turn_end` → `agent_settled` → manual compaction → Automatic continuation signal. The matching custom `message_start` returns the trigger to idle, and each parent `agent_settled` handler waits for its nested continuation to settle. This nesting permits repeated, independently earned cycles without an unconditional loop and keeps headless print mode alive until the final response.
 

@@ -5,8 +5,8 @@ import {
 	entryIndexById,
 	isSourceEntry,
 	latestCoverageIndex,
-	latestObservationCoverageIndex,
 	latestCoverageMarkerId,
+	latestObservationCoverageIndex,
 	rawTokensAfterIndex,
 	rawTokensSinceDropCoverage,
 	rawTokensSinceLastCompaction,
@@ -14,6 +14,7 @@ import {
 	rawTokensSinceReflectionCoverage,
 } from "../src/session-ledger/index.js";
 import {
+	V3_OBSERVER_COMPLETED,
 	V3_OBSERVATIONS_DROPPED,
 	V3_OBSERVATIONS_RECORDED,
 	V3_REFLECTIONS_RECORDED,
@@ -76,22 +77,6 @@ describe("session-ledger V3 progress helpers", () => {
 		expect(rawTokensSinceDropCoverage(entries)).toBe(7); // covers ledger entry om-eeeeeeeeeeee, raw after it
 	});
 
-	it("uses the greatest Recorded or Empty boundary as Observation Coverage regardless of append order", () => {
-		const entries = [
-			textCustomMessage("raw-1", "aaaa"),
-			textCustomMessage("raw-2", "bbbbbbbb"),
-			textCustomMessage("raw-3", "cccccccccccc"),
-			observerCompletedEntry("om-empty-latest", { outcome: "empty", coversUpToId: "raw-3" }),
-			observationsRecordedEntry("om-recorded-older", { observations: [observation("aaaaaaaaaaaa")], coversUpToId: "raw-2" }),
-			textCustomMessage("raw-4", "dddddddddddddddd"),
-		];
-
-		expect(latestObservationCoverageIndex(entries)).toBe(2);
-		expect(rawTokensSinceObservationCoverage(entries)).toBe(4);
-		expect(rawTokensSinceReflectionCoverage(entries)).toBe(10);
-		expect(rawTokensSinceDropCoverage(entries)).toBe(10);
-	});
-
 	it("lets coversUpToId point to a memory ledger entry", () => {
 		const entries = [
 			textCustomMessage("raw-1", "aaaa"),
@@ -102,6 +87,23 @@ describe("session-ledger V3 progress helpers", () => {
 
 		expect(latestCoverageIndex(entries, V3_OBSERVATIONS_DROPPED)).toBe(1);
 		expect(rawTokensSinceDropCoverage(entries)).toBe(2);
+	});
+
+	it("advances observation scheduling from the greatest Recorded or explicit Empty boundary", () => {
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			observationsRecordedEntry("om-recorded", {
+				observations: [observation("aaaaaaaaaaaa")],
+				coversUpToId: "raw-1",
+			}),
+			textCustomMessage("raw-2", "bbbbbbbb"),
+			observerCompletedEntry("om-empty", { outcome: "empty", coversUpToId: "raw-2" }),
+			textCustomMessage("raw-3", "cccccccccccc"),
+		];
+
+		expect(latestCoverageIndex(entries, V3_OBSERVER_COMPLETED)).toBe(2);
+		expect(latestObservationCoverageIndex(entries)).toBe(2);
+		expect(rawTokensSinceObservationCoverage(entries)).toBe(3);
 	});
 
 	it("chooses the max covered branch position, not merely latest ledger entry order", () => {
@@ -146,26 +148,6 @@ describe("session-ledger V3 progress helpers", () => {
 		expect(() => rawTokensSinceObservationCoverage(entries)).not.toThrow();
 		expect(rawTokensSinceObservationCoverage(entries)).toBe(3);
 		expect(latestCoverageIndex(entries, V3_REFLECTIONS_RECORDED)).toBe(-1);
-	});
-
-	it("ignores malformed, orphaned, and non-source Empty markers without advancing Observation Coverage", () => {
-		const entries = [
-			textCustomMessage("raw-1", "aaaa"),
-			observerCompletedEntry("om-empty-wrong-outcome", { outcome: "empty", coversUpToId: "raw-1" }, {
-				data: { outcome: "recorded", coversUpToId: "raw-1" },
-			}),
-			observerCompletedEntry("om-empty-no-boundary", { outcome: "empty", coversUpToId: "raw-1" }, {
-				data: { outcome: "empty", coversUpToId: "" },
-			}),
-			observerCompletedEntry("om-empty-orphan", { outcome: "empty", coversUpToId: "missing" }),
-			compactionEntry("cmp-1"),
-			observerCompletedEntry("om-empty-non-source", { outcome: "empty", coversUpToId: "cmp-1" }),
-			textCustomMessage("raw-2", "bbbbbbbb"),
-		];
-
-		expect(() => rawTokensSinceObservationCoverage(entries)).not.toThrow();
-		expect(latestObservationCoverageIndex(entries)).toBe(-1);
-		expect(rawTokensSinceObservationCoverage(entries)).toBe(3);
 	});
 
 	it("counts raw tokens since the latest Pi compaction without throwing on old memory details", () => {

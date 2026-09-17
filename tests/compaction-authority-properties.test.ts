@@ -4,6 +4,7 @@ import * as fc from "fast-check";
 import {
 	OM_OBSERVER_COMPLETED,
 	OM_OBSERVATIONS_RECORDED,
+	buildCompactionProjection,
 	compactionAuthority,
 	type Entry,
 } from "../src/session-ledger/index.js";
@@ -33,6 +34,13 @@ function entriesWithRecordedCoverage(ids: string[], coverageIndex: number): Entr
 	];
 }
 
+function authorityFor(entries: Entry[], firstKeptEntryId: string) {
+	const projection = buildCompactionProjection(entries, firstKeptEntryId, {
+		observationsPoolMaxTokens: Number.POSITIVE_INFINITY,
+	});
+	return compactionAuthority(entries, firstKeptEntryId, structuredClone(projection));
+}
+
 const boundaryScenarioArb = fc.integer({ min: 2, max: 12 }).chain((count) =>
 	fc.record({
 		count: fc.constant(count),
@@ -40,19 +48,6 @@ const boundaryScenarioArb = fc.integer({ min: 2, max: 12 }).chain((count) =>
 		coverageIndex: fc.integer({ min: 0, max: count - 1 }),
 	}),
 );
-
-const monotonicScenarioArb = fc.integer({ min: 2, max: 12 }).chain((count) => {
-	return fc.integer({ min: 1, max: count - 1 }).chain((firstKeptIndex) => {
-		return fc.integer({ min: 0, max: count - 1 }).chain((earlierCoverageIndex) =>
-			fc.integer({ min: earlierCoverageIndex, max: count - 1 }).map((laterCoverageIndex) => ({
-				count,
-				firstKeptIndex,
-				earlierCoverageIndex,
-				laterCoverageIndex,
-			})),
-		);
-	});
-});
 
 const invalidCoverageMarkerArb: fc.Arbitrary<Entry> = fc.oneof(
 	fc.anything().map((noise) => ({
@@ -84,44 +79,46 @@ const invalidCoverageMarkerArb: fc.Arbitrary<Entry> = fc.oneof(
 	}),
 );
 
-describe("Compaction Authority properties", () => {
-	it("authorizes exactly when source-backed coverage reaches the last source before first kept", () => {
+describe("projection-aware Compaction Authority properties", () => {
+	it("authorizes exactly when source coverage reaches the prune boundary and its batch is projected", () => {
 		fc.assert(
 			fc.property(boundaryScenarioArb, ({ count, firstKeptIndex, coverageIndex }) => {
 				const ids = sourceIds(count);
-				const decision = compactionAuthority(
+				const decision = authorityFor(
 					entriesWithRecordedCoverage(ids, coverageIndex),
 					ids[firstKeptIndex],
 				);
+				const reachesPrunedSource = coverageIndex >= firstKeptIndex - 1;
+				const batchIsProjected = coverageIndex <= firstKeptIndex;
 
 				expect(decision.owner).toBe(
-					coverageIndex >= firstKeptIndex - 1 ? "observational-memory" : "host",
+					reachesPrunedSource && batchIsProjected ? "observational-memory" : "host",
 				);
 				expect(decision.pruneBoundaryId).toBe(ids[firstKeptIndex - 1]);
-				expect(decision.coverageBoundaryId).toBe(ids[coverageIndex]);
 			}),
 			PROPERTY_OPTIONS,
 		);
 	});
 
-	it("never revokes observational-memory authority when valid coverage advances", () => {
+	it("rejects every cross-boundary batch excluded from the projection", () => {
 		fc.assert(
 			fc.property(
-				monotonicScenarioArb,
-				({ count, firstKeptIndex, earlierCoverageIndex, laterCoverageIndex }) => {
+				fc.integer({ min: 3, max: 12 }),
+				fc.integer({ min: 1, max: 10 }),
+				(count, rawOffset) => {
+					const firstKeptIndex = 1 + (rawOffset % (count - 2));
+					const coverageIndex = firstKeptIndex + 1;
 					const ids = sourceIds(count);
-					const earlier = compactionAuthority(
-						entriesWithRecordedCoverage(ids, earlierCoverageIndex),
-						ids[firstKeptIndex],
-					);
-					const later = compactionAuthority(
-						entriesWithRecordedCoverage(ids, laterCoverageIndex),
+					const decision = authorityFor(
+						entriesWithRecordedCoverage(ids, coverageIndex),
 						ids[firstKeptIndex],
 					);
 
-					if (earlier.owner === "observational-memory") {
-						expect(later.owner).toBe("observational-memory");
-					}
+					expect(decision).toMatchObject({
+						owner: "host",
+						reason: "projection-incomplete",
+						pruneBoundaryId: ids[firstKeptIndex - 1],
+					});
 				},
 			),
 			PROPERTY_OPTIONS,
@@ -136,7 +133,7 @@ describe("Compaction Authority properties", () => {
 				({ count, firstKeptIndex, coverageIndex }, insertionPoints) => {
 					const ids = sourceIds(count);
 					const entries = entriesWithRecordedCoverage(ids, coverageIndex);
-					const expected = compactionAuthority(entries, ids[firstKeptIndex]);
+					const expected = authorityFor(entries, ids[firstKeptIndex]);
 					const withMetadata = [...entries];
 					for (let index = 0; index < insertionPoints.length; index++) {
 						const insertAt = insertionPoints[index] % (withMetadata.length + 1);
@@ -148,14 +145,14 @@ describe("Compaction Authority properties", () => {
 						});
 					}
 
-					expect(compactionAuthority(withMetadata, ids[firstKeptIndex])).toEqual(expected);
+					expect(authorityFor(withMetadata, ids[firstKeptIndex])).toEqual(expected);
 				},
 			),
 			PROPERTY_OPTIONS,
 		);
 	});
 
-	it("never grants authority to malformed, orphaned, or non-source coverage", () => {
+	it("never grants authority to malformed, orphaned, or Empty coverage", () => {
 		fc.assert(
 			fc.property(invalidCoverageMarkerArb, (marker) => {
 				const entries: Entry[] = [
@@ -165,9 +162,8 @@ describe("Compaction Authority properties", () => {
 					marker,
 				];
 
-				expect(compactionAuthority(entries, "source-1")).toMatchObject({
+				expect(authorityFor(entries, "source-1")).toMatchObject({
 					owner: "host",
-					reason: "uncovered",
 					pruneBoundaryId: "source-0",
 				});
 			}),
@@ -175,13 +171,12 @@ describe("Compaction Authority properties", () => {
 		);
 	});
 
-	it("scopes authority to source newly pruned after prior native and OM compactions", () => {
+	it("scopes authority to source newly pruned after native and OM compactions", () => {
 		fc.assert(
 			fc.property(
-				boundaryScenarioArb,
 				fc.boolean(),
-				({ count, firstKeptIndex, coverageIndex }, previousWasOm) => {
-					const ids = sourceIds(count, "live");
+				(previousWasOm) => {
+					const ids = sourceIds(4, "live");
 					const previous = compactionEntry("previous-compaction", {
 						firstKeptEntryId: ids[0],
 						details: previousWasOm ? memoryDetails() : undefined,
@@ -190,19 +185,20 @@ describe("Compaction Authority properties", () => {
 						sourceEntry("already-compacted"),
 						sourceEntry(ids[0], 0),
 						previous,
-						...ids.slice(1).map((id, index) => sourceEntry(id, index + 1)),
+						sourceEntry(ids[1], 1),
 						observationsEntry(
 							"current-coverage",
-							[observation("aaaaaaaaaaaa", { sourceEntryIds: [ids[coverageIndex]] })],
-							ids[coverageIndex],
+							[observation("aaaaaaaaaaaa", { sourceEntryIds: [ids[1]] })],
+							ids[1],
 						),
+						sourceEntry(ids[2], 2),
+						sourceEntry(ids[3], 3),
 					];
 
-					const decision = compactionAuthority(entries, ids[firstKeptIndex]);
-					expect(decision.owner).toBe(
-						coverageIndex >= firstKeptIndex - 1 ? "observational-memory" : "host",
-					);
-					expect(decision.pruneBoundaryId).toBe(ids[firstKeptIndex - 1]);
+					expect(authorityFor(entries, ids[2])).toMatchObject({
+					owner: "observational-memory",
+					pruneBoundaryId: ids[1],
+				});
 				},
 			),
 			PROPERTY_OPTIONS,

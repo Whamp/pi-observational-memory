@@ -4,7 +4,6 @@ import { foldLedger } from "../src/session-ledger/index.js";
 import {
 	branchSummary,
 	observation,
-	observerCompletedEntry,
 	observationsDroppedEntry,
 	observationsRecordedEntry,
 	oldV2ObservationEntry,
@@ -96,21 +95,6 @@ describe("session-ledger V3 folding", () => {
 		expect(folded.observations).toEqual([]);
 		expect(folded.reflections).toEqual([]);
 		expect(folded.activeObservations).toEqual([]);
-	});
-
-	it("keeps Empty completion metadata out of folded memory without hiding recorded memory", () => {
-		const recorded = observation("aaaaaaaaaaaa", { sourceEntryIds: ["raw-1"] });
-		const entries = [
-			textCustomMessage("raw-1", "aaaa"),
-			observationsRecordedEntry("om-recorded", { observations: [recorded], coversUpToId: "raw-1" }),
-			observerCompletedEntry("om-empty", { outcome: "empty", coversUpToId: "raw-1" }),
-		];
-
-		const folded = foldLedger(entries);
-
-		expect(folded.observations).toEqual([recorded]);
-		expect(folded.activeObservations).toEqual([recorded]);
-		expect(folded.reflections).toEqual([]);
 	});
 
 	it("folds only the branch path supplied by the caller", () => {

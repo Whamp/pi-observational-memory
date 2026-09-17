@@ -9,10 +9,12 @@ export interface ConfiguredModel {
 	thinking?: ModelThinkingLevel;
 }
 
+/** One independently configurable memory worker stage. */
 export type StageName = "observer" | "reflector" | "dropper";
-export type CompactionTrigger = "auto" | "native" | "agentEnd" | "betweenTurns";
-export type EffectiveCompactionTrigger = Exclude<CompactionTrigger, "auto">;
+/** Proactive compaction uses Pi's settled event unless explicitly disabled. */
+export type CompactionTrigger = "agentSettled" | "native";
 
+/** Optional model and thinking overrides for one memory worker stage. */
 export interface StageModelConfig {
 	model?: ConfiguredModel;
 	thinking?: ModelThinkingLevel;
@@ -42,18 +44,32 @@ export type CompactAfterTokensMode = "calibrated" | "ratio";
 export interface Config {
 	observeAfterTokens: number;
 	reflectAfterTokens: number;
+	/**
+	 * Maximum estimated source tokens serialized into a single observer chunk.
+	 * Unset (default) derives the cap from the resolved memory model's context
+	 * window; see {@link resolveObserverChunkMaxTokens}.
+	 */
+	observerChunkMaxTokens?: number;
 	compactAfterTokens: number;
 	compactAfterTokensMode: CompactAfterTokensMode;
 	compactAfterTokensRatio: number;
 	observationsPoolMaxTokens: number;
 	observationsPoolTargetTokens: number;
 	agentMaxTurns: number;
-	compactionTrigger: CompactionTrigger;
-	showWorkerNotifications: boolean;
+	/**
+	 * Maximum output tokens requested for background memory-agent loops
+	 * (observer/reflector/dropper). Always clamped to the model's own
+	 * `maxTokens` when available. Lower it for local servers with a modest
+	 * context window, where concurrent sub-agent requests share KV with the
+	 * main session and the default 32K response budget can overflow the slot.
+	 */
+	agentMaxTokens: number;
 	model?: ConfiguredModel;
 	observer?: StageModelConfig;
 	reflector?: StageModelConfig;
 	dropper?: StageModelConfig;
+	compactionTrigger: CompactionTrigger;
+	showWorkerNotifications: boolean;
 	passive: boolean;
 	debugLog: boolean;
 }
@@ -67,7 +83,8 @@ export const DEFAULTS: Config = {
 	observationsPoolMaxTokens: 20_000,
 	observationsPoolTargetTokens: 10_000,
 	agentMaxTurns: 16,
-	compactionTrigger: "auto",
+	agentMaxTokens: 32_000,
+	compactionTrigger: "agentSettled",
 	showWorkerNotifications: true,
 	passive: false,
 	debugLog: false,
@@ -93,7 +110,50 @@ export function resolveCompactAfterTokens(config: Config, contextWindow: number 
 }
 
 export const THINKING_LEVEL_VALUES: readonly ModelThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
-export const COMPACTION_TRIGGER_VALUES: readonly CompactionTrigger[] = ["auto", "native", "agentEnd", "betweenTurns"] as const;
+/** Supported proactive compaction lifecycle modes. */
+export const COMPACTION_TRIGGER_VALUES: readonly CompactionTrigger[] = ["agentSettled", "native"] as const;
+
+/** Observer chunk cap used when no config is set and the model's context window is unknown. */
+export const OBSERVER_CHUNK_FALLBACK_MAX_TOKENS = 60_000;
+
+/** Smallest useful observer chunk: enough for labels, omission markers, and source context. */
+export const OBSERVER_CHUNK_MIN_TOKENS = 256;
+
+/**
+ * Fraction of the memory model's context window used for the derived observer
+ * chunk cap. Chunk sizes are estimated at ~4 chars/token, which can undercount
+ * real tokens by up to ~4x on non-ASCII content, so 0.2 keeps even the worst
+ * case at ~80% of the window with room left for the system prompt, prior
+ * memory, and the response.
+ */
+export const OBSERVER_CHUNK_CONTEXT_RATIO = 0.2;
+
+/**
+ * Resolve the maximum estimated tokens the observer serializes into one chunk.
+ *
+ * An explicit `observerChunkMaxTokens` config value always wins. Otherwise the
+ * cap is `floor(contextWindow * OBSERVER_CHUNK_CONTEXT_RATIO)` for the resolved
+ * memory model, falling back to {@link OBSERVER_CHUNK_FALLBACK_MAX_TOKENS} when
+ * the context window is unavailable.
+ *
+ * Without a cap, a backlog that outgrows the model's context window (e.g.
+ * after repeated observer failures, or when the extension is enabled mid-way
+ * into a long session) makes every observer call fail, so coverage never
+ * advances and the session can never recover. With the cap, oversized backlogs
+ * are drained oldest-first across successive runs.
+ */
+export function resolveObserverChunkMaxTokens(config: Config, contextWindow: number | undefined): number {
+	if (config.observerChunkMaxTokens !== undefined && config.observerChunkMaxTokens > 0) {
+		return Math.max(OBSERVER_CHUNK_MIN_TOKENS, config.observerChunkMaxTokens);
+	}
+	if (typeof contextWindow === "number" && Number.isFinite(contextWindow) && contextWindow > 0) {
+		return Math.max(
+			OBSERVER_CHUNK_MIN_TOKENS,
+			Math.floor(contextWindow * OBSERVER_CHUNK_CONTEXT_RATIO),
+		);
+	}
+	return OBSERVER_CHUNK_FALLBACK_MAX_TOKENS;
+}
 
 const SETTINGS_KEY = "observational-memory";
 const PASSIVE_ENV = "PI_OBSERVATIONAL_MEMORY_PASSIVE";
@@ -115,8 +175,12 @@ function isThinkingLevel(value: unknown): value is ModelThinkingLevel {
 	return typeof value === "string" && (THINKING_LEVEL_VALUES as readonly string[]).includes(value);
 }
 
-function isCompactionTrigger(value: unknown): value is CompactionTrigger {
-	return typeof value === "string" && (COMPACTION_TRIGGER_VALUES as readonly string[]).includes(value);
+function normalizeCompactionTrigger(value: unknown): CompactionTrigger | undefined {
+	if (value === "native") return "native";
+	if (value === "agentSettled" || value === "auto" || value === "agentEnd" || value === "betweenTurns") {
+		return "agentSettled";
+	}
+	return undefined;
 }
 
 function isCompactAfterTokensMode(value: unknown): value is CompactAfterTokensMode {
@@ -164,10 +228,12 @@ function normalizeSettingsConfig(value: Record<string, unknown>): Partial<Config
 	const numberKeys = [
 		"observeAfterTokens",
 		"reflectAfterTokens",
+		"observerChunkMaxTokens",
 		"compactAfterTokens",
 		"observationsPoolMaxTokens",
 		"observationsPoolTargetTokens",
 		"agentMaxTurns",
+		"agentMaxTokens",
 	] as const;
 	for (const key of numberKeys) {
 		const normalizedValue = positiveIntegerOrUndefined(value[key]);
@@ -178,19 +244,42 @@ function normalizeSettingsConfig(value: Record<string, unknown>): Partial<Config
 	}
 	const ratio = validRatioOrUndefined(value.compactAfterTokensRatio);
 	if (ratio !== undefined) normalized.compactAfterTokensRatio = ratio;
-	if (typeof value.showWorkerNotifications === "boolean") {
-		normalized.showWorkerNotifications = value.showWorkerNotifications;
-	}
+	if (typeof value.showWorkerNotifications === "boolean") normalized.showWorkerNotifications = value.showWorkerNotifications;
 	if (typeof value.passive === "boolean") normalized.passive = value.passive;
 	if (typeof value.debugLog === "boolean") normalized.debugLog = value.debugLog;
-	if (isCompactionTrigger(value.compactionTrigger)) normalized.compactionTrigger = value.compactionTrigger;
+	const compactionTrigger = normalizeCompactionTrigger(value.compactionTrigger);
+	if (compactionTrigger) normalized.compactionTrigger = compactionTrigger;
 	const model = normalizeModel(value.model);
 	if (model) normalized.model = model;
-	for (const stage of ["observer", "reflector", "dropper"] as const) {
-		const stageConfig = normalizeStageConfig(value[stage]);
-		if (stageConfig) normalized[stage] = stageConfig;
+	for (const stageName of ["observer", "reflector", "dropper"] as const) {
+		const stage = normalizeStageConfig(value[stageName]);
+		if (stage) normalized[stageName] = stage;
 	}
 	return normalized;
+}
+
+/** Resolves the configured model inherited by one memory stage. */
+export function resolveStageModelConfig(config: Config, stage: StageName): ConfiguredModel | undefined {
+	if (stage === "observer") return config.observer?.model ?? config.model;
+	if (stage === "reflector") return config.reflector?.model ?? config.model;
+	return config.dropper?.model ?? config.reflector?.model ?? config.model;
+}
+
+/** Resolves the thinking level inherited by one memory stage. */
+export function resolveStageThinking(config: Config, stage: StageName): ModelThinkingLevel {
+	const shared = config.model?.thinking ?? "low";
+	const reflectorThinking = config.reflector?.thinking ?? config.reflector?.model?.thinking ?? shared;
+	if (stage === "observer") return config.observer?.thinking ?? config.observer?.model?.thinking ?? shared;
+	if (stage === "reflector") return reflectorThinking;
+	return config.dropper?.thinking ?? config.dropper?.model?.thinking ?? reflectorThinking;
+}
+
+/** Resolves a stage's model override and thinking level together. */
+export function resolveStageModel(
+	config: Config,
+	stage: StageName,
+): { model?: ConfiguredModel; thinking: ModelThinkingLevel } {
+	return { model: resolveStageModelConfig(config, stage), thinking: resolveStageThinking(config, stage) };
 }
 
 export function readEnvConfig(env: NodeJS.ProcessEnv = process.env): Partial<Config> {
@@ -211,50 +300,6 @@ function readNamespacedConfig(path: string): Partial<Config> {
 	} catch {
 		return {};
 	}
-}
-
-/**
- * Resolve the configured model (ConfiguredModel to look up in the registry) for a stage.
- * Inheritance: observer/reflector fall back to the shared `model`; dropper falls back to
- * the reflector's model, then the shared `model`. Returns undefined when no stage or shared
- * model is set, meaning the session model should be used.
- */
-export function resolveStageModelConfig(config: Config, stage: StageName): ConfiguredModel | undefined {
-	if (stage === "observer") return config.observer?.model ?? config.model;
-	if (stage === "reflector") return config.reflector?.model ?? config.model;
-	return config.dropper?.model ?? config.reflector?.model ?? config.model;
-}
-
-/**
- * Resolve the thinking level for a stage.
- * Inheritance: observer/reflector fall back to the stage model's thinking, then the shared
- * `model.thinking`, then `low`. Dropper additionally inherits the reflector's resolved
- * thinking before the shared default.
- */
-export function resolveStageThinking(config: Config, stage: StageName): ModelThinkingLevel {
-	const shared = config.model?.thinking ?? "low";
-	const reflectorThinking = config.reflector?.thinking ?? config.reflector?.model?.thinking ?? shared;
-	if (stage === "observer") return config.observer?.thinking ?? config.observer?.model?.thinking ?? shared;
-	if (stage === "reflector") return config.reflector?.thinking ?? config.reflector?.model?.thinking ?? shared;
-	return config.dropper?.thinking ?? config.dropper?.model?.thinking ?? reflectorThinking;
-}
-
-/**
- * Resolve the model and thinking level for a stage as a pair. Pure and testable so the
- * inheritance rules can be asserted independently of Pi's model registry and auth.
- */
-export function resolveStageModel(config: Config, stage: StageName): { model?: ConfiguredModel; thinking: ModelThinkingLevel } {
-	return { model: resolveStageModelConfig(config, stage), thinking: resolveStageThinking(config, stage) };
-}
-
-export function resolveEffectiveCompactionTrigger(
-	config: Pick<Config, "compactionTrigger">,
-	mode?: string,
-): EffectiveCompactionTrigger {
-	if (config.compactionTrigger === "native") return "native";
-	if (config.compactionTrigger === "agentEnd") return "agentEnd";
-	if (config.compactionTrigger === "betweenTurns") return "betweenTurns";
-	return mode === "print" || mode === "json" ? "native" : "agentEnd";
 }
 
 export function loadConfig(cwd: string, env: NodeJS.ProcessEnv = process.env): Config {
