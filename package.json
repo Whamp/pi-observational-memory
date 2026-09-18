@@ -2,7 +2,7 @@
   "name": "pi-observational-memory",
   "version": "0.0.0-private",
   "private": true,
-  "description": "Observational memory extension for pi — cache-friendly tiered compaction with observations and reflections.",
+  "description": "Observational memory extension for pi \u2014 cache-friendly tiered compaction with observations and reflections.",
   "type": "module",
   "license": "MIT",
   "author": "elpapi42",
@@ -32,7 +32,9 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:properties": "vitest run tests/*properties.test.ts",
+    "test:runtime-compaction": "vitest run tests/compaction-runtime.integration.test.ts"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",
