@@ -30,7 +30,7 @@ describe("Jev token estimator", () => {
 				// Arrange
 				const alphaRuns = text.match(/[A-Za-z]+/g)?.length ?? 0;
 
-				// Act / Assert: every alphabetic run costs at least one token.
+				// Act / Assert
 				expect(estimateJevTokens(text)).toBeGreaterThanOrEqual(alphaRuns);
 			}),
 			PROPERTY_OPTIONS,
@@ -40,7 +40,7 @@ describe("Jev token estimator", () => {
 	it("is monotone under concatenation", () => {
 		fc.assert(
 			fc.property(fc.string({ maxLength: 2_048 }), fc.string({ maxLength: 2_048 }), (left, right) => {
-				// Act / Assert: merging pieces can only shrink boundary runs, never below either part.
+				// Act / Assert
 				const joined = estimateJevTokens(left + right);
 				expect(joined).toBeGreaterThanOrEqual(estimateJevTokens(left));
 				expect(joined).toBeGreaterThanOrEqual(estimateJevTokens(right));
@@ -52,7 +52,7 @@ describe("Jev token estimator", () => {
 	it("stays above the split-word count for prose bodies", () => {
 		fc.assert(
 			fc.property(fc.array(fc.stringMatching(/^[a-z]{1,12}$/), { maxLength: 64 }), (words) => {
-				// Arrange: every whitespace-delimited token carries at least one alphabetic run.
+				// Arrange: whitespace-delimited tokens always contain at least one alphabetic run.
 				const body = `{"state":{"context":"${words.join(" ")}"}}`;
 				const wordCount = body.split(/\s+/).filter((word) => word.length > 0).length;
 
@@ -64,7 +64,7 @@ describe("Jev token estimator", () => {
 	});
 
 	it("overcounts a JSON-heavy dropper-shaped body against its split-word count", () => {
-		// Arrange: a realistic serialized dropper state, punctuation-dense like the wire format.
+		// Arrange: punctuation-dense realistic state body.
 		const state = {
 			context: "Compaction is pruning durable memory for a TypeScript service.",
 			reflections: [
@@ -86,7 +86,6 @@ describe("Jev token estimator", () => {
 			},
 		});
 
-		// Act / Assert: the estimator must not undercount what the API will really bill.
 		const wordCount = body.split(/\s+/).filter((word) => word.length > 0).length;
 		expect(estimateJevTokens(body)).toBeGreaterThanOrEqual(wordCount);
 	});

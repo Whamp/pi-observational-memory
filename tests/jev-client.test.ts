@@ -43,7 +43,8 @@ function fakeFetch(
 		}
 		const next = responses.shift();
 		if (next instanceof Error) return Promise.reject(next);
-		return Promise.resolve(next ?? rawResponse(500, "server error"));
+		if (next === undefined) throw new Error("jev-client.test: fakeFetch script exhausted");
+		return Promise.resolve(next);
 	};
 	return { fetch: fetchImpl, calls };
 }
@@ -78,7 +79,6 @@ describe("Jev System One client", () => {
 		});
 	});
 
-	// Retryable statuses must repeat so the last attempt keeps the scripted kind.
 	const repeated = (status: number, body: string): Response[] => [1, 2, 3].map(() => rawResponse(status, body));
 
 	it.each([

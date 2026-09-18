@@ -35,7 +35,6 @@ const poolWithVerdictsArb = observationsArb.chain((observations) =>
 			verdicts: new Map(observations.map((observation, index) => [observation.id, percents[index] / 100] as const)),
 		})));
 
-/** The exact request body the transport serializes for one chunk (state plus questions, the API's billing basis). */
 function chunkBodyTokens(state: ReturnType<typeof buildJevDropperState>, chunk: Parameters<typeof jevChunkStateValue>[1]): number {
 	return estimateJevTokens(JSON.stringify({
 		state: jevChunkStateValue(state, chunk),
@@ -57,7 +56,6 @@ describe("Jev dropper property invariants", () => {
 
 					// Assert
 					if (plan.oversized) {
-						// An oversized plan must have stopped on an observation that alone cannot fit.
 						const unplaced = state.observations.filter((fact) => !chunkIds.includes(fact.id));
 						expect(
 							unplaced.some((fact) => chunkBodyTokens(state, { observationIds: [fact.id], observations: [fact] }) > budget),
@@ -65,10 +63,8 @@ describe("Jev dropper property invariants", () => {
 						return;
 					}
 
-					// Chunks partition the pool in oldest-first order...
 					expect(chunkIds).toEqual(state.observations.map((fact) => fact.id));
 
-					// ...and every chunk fits the budget as the transport would measure it.
 					for (const chunk of plan.chunks) {
 						expect(chunkBodyTokens(state, chunk)).toBeLessThanOrEqual(budget);
 					}
@@ -131,8 +127,7 @@ describe("Jev dropper property invariants", () => {
 				const state = buildJevDropperState(observations, [], referenceTimeMs);
 				const ages = state.observations.map((fact) => fact.ageMinutes);
 
-				// Assert: age non-increasing across the state, oldest first; the sentinel
-				// (unparseable timestamp) reports as ancient and may lead.
+				// Assert
 				for (let index = 1; index < ages.length; index++) {
 					expect(ages[index] === JEV_UNPARSEABLE_AGE_MINUTES || ages[index] <= ages[index - 1]).toBe(true);
 				}

@@ -13,10 +13,7 @@ import { reflectionCoverageMap, type ReflectionCoverageTier } from "./coverage.j
 import { observationPoolMetrics } from "./pool.js";
 import { JEV_DROP_CONTEXT, JEV_DROP_CRITERIA, jevDropInstruction } from "./prompts.js";
 
-/**
- * Noul score at or above which an observation joins the drop proposal set.
- * Tuned against jev-1.13.0 in phase 0; a code constant, not a config knob.
- */
+/** Drop-proposal threshold for one noul; tuned against the pinned model in DEFAULT_JEV_MODEL_ID — see the alignment test in tests/dropper-jev.test.ts and docs/adr/0004. */
 export const JEV_DROP_NOUL_THRESHOLD = 0.8;
 
 /**
@@ -33,7 +30,7 @@ export const JEV_CHUNK_TARGET_TOKENS = 24_000;
  */
 export const JEV_UNPARSEABLE_AGE_MINUTES = 1_000_000_000;
 
-/** One active observation rendered as a Jev state fact: id, content, relevance, coverage tier, and age in minutes. */
+/** One active observation as Jev sees it; every field is precomputed in code. */
 export interface JevObservationFacts {
 	id: string;
 	content: string;
@@ -52,19 +49,13 @@ export interface JevDropperState {
 	observations: JevObservationFacts[];
 }
 
-/** Minutes since an observation was recorded; clamped at zero, sentinel when the timestamp cannot be parsed. */
 function observationAgeMinutes(timestamp: string, referenceTimeMs: number): number {
 	const parsed = Date.parse(timestamp);
 	if (!Number.isFinite(parsed)) return JEV_UNPARSEABLE_AGE_MINUTES;
 	return Math.max(0, Math.floor((referenceTimeMs - parsed) / 60_000));
 }
 
-/**
- * Build the Jev dropper state from the active pool: observations sorted
- * oldest-first (unparseable timestamps last), reflection coverage tiers from
- * the current reflections, and age in whole minutes. Pure apart from the
- * default reference time.
- */
+/** Pure. Oldest-first state with precomputed coverage and age; see JevDropperState for the ordering contract. */
 export function buildJevDropperState(
 	observations: readonly Observation[],
 	reflections: readonly Reflection[],
@@ -78,8 +69,6 @@ export function buildJevDropperState(
 		coverage: coverageById.get(observation.id) ?? "none",
 		ageMinutes: observationAgeMinutes(observation.timestamp, referenceTimeMs),
 	}));
-	// Oldest first: larger age earlier. The unparseable-timestamp sentinel is the
-	// largest age, so unparseable observations lead the state as ancient.
 	facts.sort((a, b) => b.ageMinutes - a.ageMinutes);
 	return {
 		context: JEV_DROP_CONTEXT,
@@ -88,7 +77,7 @@ export function buildJevDropperState(
 	};
 }
 
-/** Build one noul question per observation id, keyed `drop_<id>`, sharing the preservation-floor criteria. */
+/** One noul per observation id, keyed `drop_<id>`. */
 export function buildJevDropQuestions(observationIds: readonly string[]): JevQuestionSet {
 	const questions: JevQuestionSet = {};
 	for (const id of observationIds) {
@@ -101,12 +90,11 @@ export function buildJevDropQuestions(observationIds: readonly string[]): JevQue
 	return questions;
 }
 
-/** Question key for one observation id, shared by the question builder and the verdict merge. */
 function dropQuestionKey(id: string): string {
 	return `drop_${id}`;
 }
 
-/** One chunk of the Jev dropper state: the observations packed into a single request. */
+/** The observations packed into one System One request. */
 export interface JevDropperChunk {
 	observationIds: string[];
 	observations: JevObservationFacts[];
@@ -118,7 +106,6 @@ export interface JevDropperPlan {
 	oversized: boolean;
 }
 
-/** Exact estimated tokens of the request body for one chunk: the serialized state plus questions. */
 function jevChunkBodyTokens(state: JevDropperState, chunk: JevDropperChunk): number {
 	return estimateJevTokens(JSON.stringify({
 		state: jevChunkStateValue(state, chunk),
@@ -126,14 +113,7 @@ function jevChunkBodyTokens(state: JevDropperState, chunk: JevDropperChunk): num
 	}));
 }
 
-/**
- * Greedy whole-observation pack under the estimated-token budget. Each
- * candidate chunk is measured as the exact serialized body (state plus
- * questions, the same basis the API bills), so the budget cannot be undercounted
- * by envelope or quoting overhead. oversized=true when a single observation
- * cannot fit a chunk by itself; the estimator overcounts by design, so the
- * flag fails the run closed instead of risking an over-limit request.
- */
+/** Greedy whole-observation pack measured as the exact serialized request body; oversized=true fails the run closed. */
 export function chunkJevDropperState(
 	state: JevDropperState,
 	chunkTargetTokens: number = JEV_CHUNK_TARGET_TOKENS,
@@ -162,11 +142,7 @@ export function chunkJevDropperState(
 	return { chunks, oversized: false };
 }
 
-/**
- * Wire value for one chunk's request state: the globals plus only that chunk's
- * observation facts. The conversion to the transport's JSON tree happens here,
- * at the last point that knows both shapes.
- */
+/** Wire value for one chunk: globals plus only that chunk's observations. */
 export function jevChunkStateValue(state: JevDropperState, chunk: JevDropperChunk): JevStateValue {
 	return {
 		context: state.context,
@@ -181,7 +157,6 @@ export function jevChunkStateValue(state: JevDropperState, chunk: JevDropperChun
 	};
 }
 
-/** Verdict cleared of the threshold, kept with pool order for the stable tiebreak. */
 interface ClearedVerdict {
 	id: string;
 	noul: number;
@@ -213,22 +188,15 @@ export function selectJevDropIds(
 	return selected.length > 0 ? selected : undefined;
 }
 
-/**
- * Transport or state failure surfaced by a Jev dropper run. `unexpected` covers
- * a throw that is not a {@link JevRequestError}.
- */
+/** Every transport kind plus the chunker's state_too_large. */
 export type JevDropperFailureReason = JevRequestErrorKind | "state_too_large";
 
-/**
- * Outcome of one Jev dropper run. `dropped` is success, including zero drops
- * (droppedIds undefined); `failed` hands the run to the LLM dropper upstream.
- */
+/** `dropped` is success, including zero drops (droppedIds undefined); `failed` hands the run to the LLM dropper. */
 export type JevDropperOutcome =
 	| { outcome: "dropped"; droppedIds?: string[] }
 	| { outcome: "failed"; reason: JevDropperFailureReason };
 
 export interface RunJevDropperArgs {
-	/** Injected Jev transport; production passes the client from createJevClient. */
 	client: JevClient;
 	observations: Observation[];
 	reflections: Reflection[];

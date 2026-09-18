@@ -914,7 +914,6 @@ describe("dropper Jev mode", () => {
 	const obsB = observation("bbbbbbbbbbbb", { sourceEntryIds: ["raw-3"], tokenCount: 10 });
 	const refA = reflection("ffffffffffff", ["aaaaaaaaaaaa"]);
 
-	/** Stub Jev client that answers every requested question with the given noul. */
 	function stubClient(noulFor: (request: JevAskRequest) => number): JevClient {
 		return {
 			askNouls: async (request) => {
@@ -966,7 +965,7 @@ describe("dropper Jev mode", () => {
 		await view.runLaunchedWork();
 
 		expect(createJevClient).toHaveBeenCalledWith({ apiKey: "test-key", modelId: "jev-1.13.0" });
-				expect(mockAgents.runDropper).not.toHaveBeenCalled();
+		expect(mockAgents.runDropper).not.toHaveBeenCalled();
 		expect(view.pi.appendEntry).toHaveBeenCalledWith(OM_OBSERVATIONS_DROPPED, { observationIds: ["aaaaaaaaaaaa"], coversUpToId: "raw-1" });
 	});
 

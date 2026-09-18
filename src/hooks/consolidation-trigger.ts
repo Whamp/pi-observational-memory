@@ -128,11 +128,7 @@ function shouldNotifyWorker(runtime: Runtime, ctx: ConsolidationCtx): boolean {
 	return runtime.config.showWorkerNotifications && ctx.hasUI;
 }
 
-/**
- * Dependency seams for the consolidation trigger. Defaults wire the production
- * Jev transport; tests inject fakes through this interface instead of module
- * mocks.
- */
+/** Test seam for the Jev transport; the default wires the production client. */
 export interface ConsolidationDeps {
 	createJevClient: typeof createJevClient;
 }
@@ -529,11 +525,6 @@ async function runDropperStage(
 	return "continue";
 }
 
-/**
- * One-time UI notice that the dropper is falling back from Jev to the LLM
- * engine. Mirrors `resolveFailureNotified`: notified at most once per session
- * (when UI notifications are available); later fallbacks only log.
- */
 function notifyJevFallback(runtime: Runtime, ctx: ConsolidationCtx, reason: string): void {
 	debugLog("dropper.jev_fallback", { reason });
 	if (runtime.jevFallbackNotified) return;
@@ -543,10 +534,7 @@ function notifyJevFallback(runtime: Runtime, ctx: ConsolidationCtx, reason: stri
 	}
 }
 
-/**
- * Append the shared dropper tombstone when there is something to drop. The
- * payload is identical for both decision engines; zero drops append nothing.
- */
+/** Shared tombstone tail for both dropper engines; zero drops append nothing. */
 function appendDroppedObservations(
 	pi: ExtensionAPI,
 	entries: Entry[],

@@ -2,10 +2,8 @@
  * Conservative token estimate for sizing Jev requests.
  *
  * Faithful port of fast-jev's character-class estimator, measured 9-16% above
- * the API's true token count, so budgets under-fill rather than overflow.
- * Alphabetic runs cost 1 + floor((len - 1) / 6); digit runs cost len / 2; other
- * glyphs cost 0.9 each; whitespace is free. Do not retune the constants without
- * re-measuring against the live API.
+ * the API's true token count, so budgets under-fill rather than overflow. Do
+ * not retune the constants without re-measuring against the live API.
  */
 export function estimateJevTokens(text: string): number {
 	let tokens = 0;

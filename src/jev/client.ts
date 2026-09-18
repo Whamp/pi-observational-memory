@@ -7,7 +7,7 @@
  * logs, and never writes the API key anywhere except the Authorization header.
  */
 
-/** Default System One model id used when no override is configured. */
+/** Model pin the drop threshold is tuned against; see JEV_DROP_NOUL_THRESHOLD. */
 export const DEFAULT_JEV_MODEL_ID = "jev-1.13.0";
 
 const DEFAULT_JEV_ENDPOINT = "https://api.typesafe.ai/v1/systemone";
@@ -43,17 +43,15 @@ export interface JevNoulQuestion {
 	criteria?: JevNoulCriteria;
 }
 
-/** Noul questions keyed by caller-chosen id, one answer per key. */
 export type JevQuestionSet = Record<string, JevNoulQuestion>;
 
 export interface JevAskRequest {
-	/** JSON-serializable state; the client serializes it, the caller owns the shape. */
 	state: JevStateValue;
 	questions: JevQuestionSet;
 	signal?: AbortSignal;
 }
 
-/** Token usage reported by the API for one request. */
+/** API-reported usage; output tokens are billed free. */
 export interface JevUsage {
 	inputTokens: number;
 	outputTokens: number;
@@ -131,7 +129,6 @@ export interface JevClient {
 	askNouls(request: JevAskRequest): Promise<JevAskResult>;
 }
 
-/** One classified non-2xx status: the error to keep, plus an optional Retry-After delay. */
 interface ClassifiedStatusError {
 	error: JevRequestError;
 	retryAfterMs?: number;
@@ -147,12 +144,7 @@ function finiteNumberOrUndefined(value: unknown): number | undefined {
 
 type JevParseOutcome = { ok: true; result: JevAskResult } | { ok: false; reason: string };
 
-/**
- * Parse the System One 200 body into one noul per requested id. Fails with a
- * diagnostic reason when any requested id is missing, any noul is missing or
- * outside [0,1], or usage is absent/malformed — the boundary refuses partial
- * answers and names the refusal so the failure is diagnosable from the log.
- */
+/** Refuses partial answers and names each refusal for the thrown diagnostic. */
 function parseJevAnswers(text: string, requestedIds: readonly string[]): JevParseOutcome {
 	let parsed: unknown;
 	try {
@@ -184,7 +176,6 @@ function retryAfterMsFromHeader(value: string | null): number | undefined {
 	return Number.isInteger(seconds) && seconds >= 0 ? seconds * 1_000 : undefined;
 }
 
-/** Map a non-2xx status to its Jev failure kind and retryability. */
 function errorForStatus(status: number, body: string, retryAfterHeader: string | null): ClassifiedStatusError {
 	if (status === 401) {
 		return { error: new JevRequestError("unauthorized", "jev.ask_unauthorized: System One rejected the API key (401)", false) };
@@ -213,7 +204,6 @@ function errorForStatus(status: number, body: string, retryAfterHeader: string |
 	return { error: new JevRequestError("invalid_request", `jev.ask_invalid_request: System One rejected the request (${status})`, false) };
 }
 
-/** Map a fetch rejection to its Jev failure kind; caller aborts never retry. */
 function errorForFetchFailure(error: unknown, callerSignal: AbortSignal | undefined): JevRequestError {
 	if (callerSignal?.aborted) {
 		return new JevRequestError("aborted", "jev.ask_aborted: caller aborted the System One request", false);
@@ -225,7 +215,6 @@ function errorForFetchFailure(error: unknown, callerSignal: AbortSignal | undefi
 	return new JevRequestError("network", `jev.ask_network: System One request failed (${detail})`, true);
 }
 
-/** Delay before the next attempt: clamped Retry-After when present, else full-jitter exponential backoff. */
 function nextBackoffMs(retryAfterMs: number | undefined, failedAttempt: number, baseMs: number, maxMs: number): number {
 	if (retryAfterMs !== undefined) return Math.min(maxMs, Math.max(0, retryAfterMs));
 	return Math.random() * Math.min(maxMs, baseMs * 2 ** failedAttempt);
@@ -237,10 +226,7 @@ function defaultSleep(ms: number): Promise<void> {
 	});
 }
 
-/**
- * Create a Jev client bound to one API key. Retries 429/529/network failures
- * with full-jitter exponential backoff; all other failures fail fast.
- */
+/** Client bound to one API key; see JevClient for the retry contract. */
 export function createJevClient(options: JevClientOptions): JevClient {
 	const {
 		apiKey,

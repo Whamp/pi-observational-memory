@@ -4,6 +4,7 @@ import {
 	buildJevDropQuestions,
 	chunkJevDropperState,
 	JEV_CHUNK_TARGET_TOKENS,
+	JEV_DROP_NOUL_THRESHOLD,
 	JEV_UNPARSEABLE_AGE_MINUTES,
 	jevChunkStateValue,
 	runJevDropper,
@@ -12,8 +13,8 @@ import {
 	type JevDropperChunk,
 	type JevDropperState,
 } from "../src/agents/dropper/jev.js";
-import { JEV_DROP_CONTEXT, JEV_DROP_CRITERIA } from "../src/agents/dropper/prompts.js";
-import { JevRequestError, type JevAskRequest } from "../src/jev/client.js";
+import { DROPPER_SYSTEM, JEV_DROP_CONTEXT, JEV_DROP_CRITERIA } from "../src/agents/dropper/prompts.js";
+import { DEFAULT_JEV_MODEL_ID, JevRequestError, type JevAskRequest } from "../src/jev/client.js";
 import { observation, reflection } from "./fixtures/session.js";
 
 interface ClientHarness {
@@ -297,7 +298,6 @@ describe("runJevDropper", () => {
 
 describe("Jev dropper budget sanity", () => {
 	it("keeps the default budget with margin under the API state ceiling", () => {
-		// The API rejects state+questions over 32k tokens; the budget must sit under it.
 		expect(JEV_CHUNK_TARGET_TOKENS).toBeLessThan(32_000);
 		expect(JEV_CHUNK_TARGET_TOKENS).toBeGreaterThan(0);
 	});
@@ -315,5 +315,39 @@ describe("jevChunkStateValue", () => {
 
 		expect(wire).toMatchObject({ context: JEV_DROP_CONTEXT, observations: [{ id: "bbbbbbbbbbbb" }] });
 		expect(wire).toHaveProperty("reflections");
+	});
+});
+
+describe("Jev alignment", () => {
+	it("pins the drop threshold to the model it was tuned against", () => {
+		// Tuned as a pair against docs/adr/0004-jev-dropper-decision-engine.md; changing either literal without re-tuning fails here.
+		expect(JEV_DROP_NOUL_THRESHOLD).toBe(0.8);
+		expect(DEFAULT_JEV_MODEL_ID).toBe("jev-1.13.0");
+	});
+
+	it("keeps JEV_DROP_CRITERIA aligned with DROPPER_SYSTEM's preservation floor", () => {
+		const preservationFloorPhrases = [
+			"user preference",
+			"constraint",
+			"correction",
+			"decision",
+			"concrete completion",
+			"identifier",
+			"file path",
+			"exact error",
+			"date",
+			"deadline",
+			"blocker",
+			"TODO",
+			"non-standard",
+		] as const;
+		const system = DROPPER_SYSTEM.toLowerCase();
+		const criteria = JSON.stringify(JEV_DROP_CRITERIA).toLowerCase();
+
+		for (const phrase of preservationFloorPhrases) {
+			const lowered = phrase.toLowerCase();
+			expect(system).toContain(lowered);
+			expect(criteria).toContain(lowered);
+		}
 	});
 });

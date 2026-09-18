@@ -21,28 +21,18 @@ export interface StageModelConfig {
 	thinking?: ModelThinkingLevel;
 }
 
-/** Decision engine for the dropper memory stage. */
 export type DropperStageMode = "llm" | "jev";
 
-/** Supported dropper decision engines. */
 export const DROPPER_STAGE_MODE_VALUES: readonly DropperStageMode[] = ["llm", "jev"] as const;
 
-/**
- * TypeSafe System One settings for the dropper's Jev engine. The API key comes
- * from an environment variable, never from settings files.
- */
+/** TypeSafe System One settings for the dropper's Jev engine; the key comes from env, never settings. */
 export interface JevDropperConfig {
-	/** Pinned System One model id; empty uses the transport default. */
 	modelId?: string;
-	/** Environment variable holding the System One API key. */
 	apiKeyEnv?: string;
 }
 
-/** Per-stage dropper configuration: model/thinking overrides plus the Jev decision engine. */
 export interface DropperStageConfig extends StageModelConfig {
-	/** Decision engine for the dropper stage; empty uses "llm". */
 	mode?: DropperStageMode;
-	/** TypeSafe System One settings used when mode is "jev". */
 	jev?: JevDropperConfig;
 }
 
@@ -336,10 +326,8 @@ export function resolveStageModel(
 	return { model: resolveStageModelConfig(config, stage), thinking: resolveStageThinking(config, stage) };
 }
 
-/** Environment variable read for the System One API key when no override is configured. */
 export const DEFAULT_JEV_API_KEY_ENV = "TYPESAFE_API_KEY";
 
-/** Dropper Jev settings resolved to their effective values, with the API key read from env once. */
 export interface ResolvedJevDropperConfig {
 	mode: DropperStageMode;
 	modelId: string;
@@ -348,10 +336,7 @@ export interface ResolvedJevDropperConfig {
 	apiKey?: string;
 }
 
-/**
- * Resolve the dropper's Jev settings with defaults applied, reading the API key
- * from env at the same time so callers need exactly one lookup.
- */
+/** Dropper Jev settings with defaults applied; the API key is read from env here. */
 export function resolveJevDropperConfig(config: Config, env: NodeJS.ProcessEnv = process.env): ResolvedJevDropperConfig {
 	const dropper = config.dropper;
 	const jev = dropper?.jev;

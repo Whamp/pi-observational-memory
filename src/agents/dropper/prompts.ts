@@ -1,20 +1,13 @@
 import type { JevNoulCriteria } from "../../jev/client.js";
 
-/**
- * One-line situation briefing shared by every Jev dropper request. It frames
- * what dropping means (active memory only) and states the keep-when-unsure bias.
- */
+/** Shared briefing framing what dropping means (active memory only) and the keep-when-unsure bias. */
 export const JEV_DROP_CONTEXT = "A coding assistant's durable memory is being compacted. The active observation pool is over its token target, and each question asks whether one observation can safely leave active memory. Dropped observations are only removed from active memory; the raw conversation history stays in the ledger, and known ids remain recallable. When unsure, keep the observation.";
 
-/** Per-observation noul instruction. The observation content lives in the state; the question names only the id. */
 export function jevDropInstruction(id: string): string {
 	return `Observation \`${id}\` can be dropped from active durable memory without losing value for the ongoing work.`;
 }
 
-/**
- * Preservation floor for Jev drop decisions, enumerated literally because Jev
- * reads criteria text literally. Must stay aligned with DROPPER_SYSTEM.
- */
+/** Preservation floor for Jev's literal reading; an alignment test keeps this and DROPPER_SYSTEM together. */
 export const JEV_DROP_CRITERIA: JevNoulCriteria = {
 	true: "Routine, superseded, or already fully captured by a reflection or a newer observation, and carrying no unique durable fact. Dropping it loses no user preference, constraint, correction, decision or rationale, concrete completion, identifier, file path, exact error, date, deadline, blocker, TODO, or non-standard term that future work depends on.",
 	false: "It uniquely carries a durable fact future work depends on: a user preference, constraint, correction, decision, concrete completion that must not be redone, identifier or path, exact error or diagnostic, date or deadline, current blocker, TODO, or non-standard term. Its meaning is not preserved anywhere else.",
