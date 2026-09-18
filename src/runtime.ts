@@ -105,6 +105,8 @@ export class Runtime {
 	compactInFlight = false;
 	compactHookInFlight = false;
 	resolveFailureNotified = false;
+	/** One-time UI notice that the dropper fell back from Jev to the LLM engine. */
+	jevFallbackNotified = false;
 	lastObserverError: string | undefined;
 	lastReflectorError: string | undefined;
 	lastDropperError: string | undefined;

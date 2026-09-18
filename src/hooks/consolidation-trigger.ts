@@ -1,11 +1,14 @@
 import type { Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { runJevDropper } from "../agents/dropper/jev.js";
 import { runDropper } from "../agents/dropper/agent.js";
 import { observationPoolMetrics } from "../agents/dropper/pool.js";
 import { runObserver } from "../agents/observer/agent.js";
 import { runReflector } from "../agents/reflector/agent.js";
+import { createJevClient } from "../jev/client.js";
 import { debugLog, withDebugLogContext } from "../debug-log.js";
 import {
+	resolveJevDropperConfig,
 	resolveObserverChunkMaxTokens,
 	resolveStageModel,
 	type StageName,
@@ -125,6 +128,15 @@ function shouldNotifyWorker(runtime: Runtime, ctx: ConsolidationCtx): boolean {
 	return runtime.config.showWorkerNotifications && ctx.hasUI;
 }
 
+/**
+ * Dependency seams for the consolidation trigger. Defaults wire the production
+ * Jev transport; tests inject fakes through this interface instead of module
+ * mocks.
+ */
+export interface ConsolidationDeps {
+	createJevClient: typeof createJevClient;
+}
+
 function isApprovedOpenCodeHostname(baseUrl: string | undefined): boolean {
 	if (!baseUrl || !URL.canParse(baseUrl)) return false;
 	const hostname = new URL(baseUrl).hostname.toLowerCase();
@@ -176,9 +188,9 @@ function makeModelResolver(runtime: Runtime, ctx: ConsolidationCtx): (stage: Sta
 	};
 }
 
-export function registerConsolidationTrigger(pi: ExtensionAPI, runtime: Runtime): void {
+export function registerConsolidationTrigger(pi: ExtensionAPI, runtime: Runtime, deps: ConsolidationDeps = { createJevClient }): void {
 	const launch = (_event: unknown, ctx: ConsolidationCtx) => {
-		maybeLaunchConsolidation(pi, runtime, ctx);
+		maybeLaunchConsolidation(pi, runtime, ctx, deps);
 	};
 	pi.on("agent_start", launch);
 	pi.on("turn_end", launch);
@@ -196,7 +208,7 @@ function debugSessionMetadata(ctx: ConsolidationCtx): { sessionId?: string; sess
 	}
 }
 
-function maybeLaunchConsolidation(pi: ExtensionAPI, runtime: Runtime, ctx: ConsolidationCtx): void {
+function maybeLaunchConsolidation(pi: ExtensionAPI, runtime: Runtime, ctx: ConsolidationCtx, deps: ConsolidationDeps): void {
 	runtime.ensureConfig(ctx.cwd);
 	if (runtime.config.passive === true) return;
 	if (runtime.consolidationInFlight) return;
@@ -222,7 +234,7 @@ function maybeLaunchConsolidation(pi: ExtensionAPI, runtime: Runtime, ctx: Conso
 		...sessionMetadata,
 		runId,
 	}, async () => {
-		await runConsolidationPipeline(pi, runtime, consolidationCtx);
+		await runConsolidationPipeline(pi, runtime, consolidationCtx, deps);
 	}));
 }
 
@@ -230,6 +242,7 @@ export async function runConsolidationPipeline(
 	pi: ExtensionAPI,
 	runtime: Runtime,
 	ctx: ConsolidationCtx,
+	deps: ConsolidationDeps = { createJevClient },
 ): Promise<void> {
 	const resolveModel = makeModelResolver(runtime, ctx);
 
@@ -254,7 +267,7 @@ export async function runConsolidationPipeline(
 
 	runtime.consolidationPhase = "dropper";
 	try {
-		await runDropperStage(pi, runtime, ctx, resolveModel, reflectorResult.sameRunReflections, reflectorResult.effectiveReflectionCoverageId);
+		await runDropperStage(pi, runtime, ctx, resolveModel, reflectorResult.sameRunReflections, reflectorResult.effectiveReflectionCoverageId, deps);
 	} catch (error) {
 		debugLog("dropper.error", { errorMessage: runtime.recordConsolidationStageError(ctx, "dropper", error) });
 	}
@@ -432,6 +445,7 @@ async function runDropperStage(
 	resolveModel: (stage: "dropper") => Promise<StageResolution | undefined>,
 	sameRunReflections: Reflection[],
 	sameRunReflectionCoverageId: string | undefined,
+	deps: ConsolidationDeps,
 ): Promise<StageOutcome> {
 	if (!sameRunReflectionCoverageId || sameRunReflections.length === 0) {
 		debugLog("dropper.waiting_for_reflection", { sameRunReflections: sameRunReflections.length });
@@ -456,6 +470,7 @@ async function runDropperStage(
 		});
 		return "continue";
 	}
+	const jevSettings = resolveJevDropperConfig(runtime.config);
 	debugLog("dropper.stage_start", {
 		observationCoverageId,
 		sameRunReflectionCoverageId,
@@ -466,16 +481,37 @@ async function runDropperStage(
 		tokensOverTarget: metrics.tokensOverTarget,
 		fullness: metrics.fullness,
 		maxDropsAllowed: metrics.maxDropsAllowed,
+		mode: jevSettings.mode,
 	});
 
 	if (shouldNotifyWorker(runtime, ctx)) ctx.ui?.notify(
 		`Observational memory: dropper running after reflection — active observation pool ~${metrics.observationTokens.toLocaleString()} / ${metrics.targetTokens.toLocaleString()} target tokens (${Math.round(metrics.fullness * 100).toLocaleString()}%)`,
 		"info",
 	);
+	const reflectionsForDropper = mergeReflections(folded.reflections, sameRunReflections);
+
+	if (jevSettings.mode === "jev") {
+		if (!jevSettings.apiKey) {
+			notifyJevFallback(runtime, ctx, "missing_api_key");
+		} else {
+			const client = deps.createJevClient({ apiKey: jevSettings.apiKey, modelId: jevSettings.modelId });
+			const outcome = await runJevDropper({
+				client,
+				observations: folded.activeObservations,
+				reflections: reflectionsForDropper,
+				targetTokens: runtime.config.observationsPoolTargetTokens,
+			});
+			if (outcome.outcome === "dropped") {
+				appendDroppedObservations(pi, entries, observationCoverageId, sameRunReflectionCoverageId, outcome.droppedIds);
+				return "continue";
+			}
+			notifyJevFallback(runtime, ctx, outcome.reason);
+		}
+	}
+
 	const resolved = await resolveModel("dropper");
 	if (!resolved) return "abort";
 
-	const reflectionsForDropper = mergeReflections(folded.reflections, sameRunReflections);
 	const droppedIds = await runDropper({
 		model: resolved.model as Model<any>,
 		apiKey: resolved.apiKey,
@@ -489,6 +525,35 @@ async function runDropperStage(
 		thinkingLevel: resolved.thinking,
 		modelRegistry: ctx.modelRegistry,
 	});
+	appendDroppedObservations(pi, entries, observationCoverageId, sameRunReflectionCoverageId, droppedIds);
+	return "continue";
+}
+
+/**
+ * One-time UI notice that the dropper is falling back from Jev to the LLM
+ * engine. Mirrors `resolveFailureNotified`: notified at most once per session
+ * (when UI notifications are available); later fallbacks only log.
+ */
+function notifyJevFallback(runtime: Runtime, ctx: ConsolidationCtx, reason: string): void {
+	debugLog("dropper.jev_fallback", { reason });
+	if (runtime.jevFallbackNotified) return;
+	if (shouldNotifyWorker(runtime, ctx) && ctx.ui) {
+		ctx.ui.notify(`Observational memory: dropper using LLM fallback — Jev unavailable (${reason})`, "warning");
+		runtime.jevFallbackNotified = true;
+	}
+}
+
+/**
+ * Append the shared dropper tombstone when there is something to drop. The
+ * payload is identical for both decision engines; zero drops append nothing.
+ */
+function appendDroppedObservations(
+	pi: ExtensionAPI,
+	entries: Entry[],
+	observationCoverageId: string,
+	sameRunReflectionCoverageId: string,
+	droppedIds: string[] | undefined,
+): void {
 	const coversUpToId = earlierCoverageMarkerId(entries, observationCoverageId, sameRunReflectionCoverageId);
 	const data = coversUpToId && droppedIds ? buildObservationsDroppedData(droppedIds, coversUpToId) : undefined;
 	debugLog("dropper.append", {
@@ -498,5 +563,4 @@ async function runDropperStage(
 		appended: data !== undefined,
 	});
 	if (data) appendEntry(pi, OM_OBSERVATIONS_DROPPED, data);
-	return "continue";
 }
