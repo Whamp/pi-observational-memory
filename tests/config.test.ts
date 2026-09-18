@@ -159,6 +159,18 @@ describe("V3 config", () => {
 		});
 	});
 
+	it("accepts max as a valid model thinking level", () => {
+		writeJson(join(cwd, ".pi", "settings.json"), {
+			"observational-memory": {
+				model: { provider: "anthropic", id: "claude", thinking: "max" },
+			},
+		});
+
+		expect(loadConfig(cwd, {})).toMatchObject({
+			model: { provider: "anthropic", id: "claude", thinking: "max" },
+		});
+	});
+
 	it("ignores invalid V3 values", () => {
 		writeJson(join(cwd, ".pi", "settings.json"), {
 			"observational-memory": {
