@@ -1,3 +1,4 @@
+import { estimateStringTokens } from "../tokens.js";
 import type { Observation, Reflection } from "./types.js";
 
 const CONTEXT_USAGE_INSTRUCTIONS = `These are condensed memories from earlier in this session.
@@ -17,15 +18,50 @@ export function reflectionToSummaryLine(reflection: Reflection): string {
 	return `[${reflection.id}] ${reflection.content}`;
 }
 
-export function renderSummary(reflections: Reflection[], observations: Observation[]): string {
-	if (reflections.length === 0 && observations.length === 0) return "";
+/** Size of rendered compaction summary text, in exact characters and estimated tokens. */
+export type SummarySize = { chars: number; estimatedTokens: number };
 
-	const parts: string[] = [CONTEXT_USAGE_INSTRUCTIONS];
-	if (reflections.length > 0) {
-		parts.push(`## Reflections\n${reflections.map(reflectionToSummaryLine).join("\n")}`);
-	}
-	if (observations.length > 0) {
-		parts.push(`## Observations\n${observations.map(observationToSummaryLine).join("\n")}`);
-	}
-	return parts.join("\n\n");
+/**
+ * Rendered compaction summary: the full text, its size, and each section's size.
+ * Section sizes exclude the blank lines that join the parts, so they sum below the total.
+ */
+export type RenderedSummary = {
+	text: string;
+	size: SummarySize;
+	sections: {
+		instructions: SummarySize;
+		reflections: SummarySize;
+		observations: SummarySize;
+	};
+};
+
+/** Measures compaction summary size: exact characters and the ceil(chars / 4) token estimate used for pool and context budgets. */
+export function measureRenderedText(text: string): SummarySize {
+	return { chars: text.length, estimatedTokens: estimateStringTokens(text) };
+}
+
+export function renderSummarySections(reflections: Reflection[], observations: Observation[]): RenderedSummary {
+	const hasMemory = reflections.length > 0 || observations.length > 0;
+	const instructions = hasMemory ? CONTEXT_USAGE_INSTRUCTIONS : "";
+	const reflectionsBlock = reflections.length > 0
+		? `## Reflections\n${reflections.map(reflectionToSummaryLine).join("\n")}`
+		: "";
+	const observationsBlock = observations.length > 0
+		? `## Observations\n${observations.map(observationToSummaryLine).join("\n")}`
+		: "";
+	const text = [instructions, reflectionsBlock, observationsBlock].filter((part) => part !== "").join("\n\n");
+
+	return {
+		text,
+		size: measureRenderedText(text),
+		sections: {
+			instructions: measureRenderedText(instructions),
+			reflections: measureRenderedText(reflectionsBlock),
+			observations: measureRenderedText(observationsBlock),
+		},
+	};
+}
+
+export function renderSummary(reflections: Reflection[], observations: Observation[]): string {
+	return renderSummarySections(reflections, observations).text;
 }
