@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { DEFAULT_JEV_MODEL_ID } from "./jev/client.js";
 
 export interface ConfiguredModel {
 	provider: string;
@@ -18,6 +19,31 @@ export type CompactionTrigger = "agentSettled" | "native";
 export interface StageModelConfig {
 	model?: ConfiguredModel;
 	thinking?: ModelThinkingLevel;
+}
+
+/** Decision engine for the dropper memory stage. */
+export type DropperStageMode = "llm" | "jev";
+
+/** Supported dropper decision engines. */
+export const DROPPER_STAGE_MODE_VALUES: readonly DropperStageMode[] = ["llm", "jev"] as const;
+
+/**
+ * TypeSafe System One settings for the dropper's Jev engine. The API key comes
+ * from an environment variable, never from settings files.
+ */
+export interface JevDropperConfig {
+	/** Pinned System One model id; empty uses the transport default. */
+	modelId?: string;
+	/** Environment variable holding the System One API key. */
+	apiKeyEnv?: string;
+}
+
+/** Per-stage dropper configuration: model/thinking overrides plus the Jev decision engine. */
+export interface DropperStageConfig extends StageModelConfig {
+	/** Decision engine for the dropper stage; empty uses "llm". */
+	mode?: DropperStageMode;
+	/** TypeSafe System One settings used when mode is "jev". */
+	jev?: JevDropperConfig;
 }
 
 /**
@@ -67,7 +93,7 @@ export interface Config {
 	model?: ConfiguredModel;
 	observer?: StageModelConfig;
 	reflector?: StageModelConfig;
-	dropper?: StageModelConfig;
+	dropper?: DropperStageConfig;
 	compactionTrigger: CompactionTrigger;
 	showWorkerNotifications: boolean;
 	passive: boolean;
@@ -223,6 +249,32 @@ function normalizeStageConfig(value: unknown): StageModelConfig | undefined {
 	return stage.model !== undefined || stage.thinking !== undefined ? stage : undefined;
 }
 
+function isDropperStageMode(value: unknown): value is DropperStageMode {
+	return typeof value === "string" && (DROPPER_STAGE_MODE_VALUES as readonly string[]).includes(value);
+}
+
+function normalizeJevDropperConfig(value: unknown): JevDropperConfig | undefined {
+	if (!isRecord(value)) return undefined;
+	const jev: JevDropperConfig = {};
+	const modelId = nonEmptyString(value.modelId);
+	const apiKeyEnv = nonEmptyString(value.apiKeyEnv);
+	if (modelId) jev.modelId = modelId;
+	if (apiKeyEnv) jev.apiKeyEnv = apiKeyEnv;
+	return modelId !== undefined || apiKeyEnv !== undefined ? jev : undefined;
+}
+
+function normalizeDropperStageConfig(value: unknown): DropperStageConfig | undefined {
+	if (!isRecord(value)) return undefined;
+	const stage: DropperStageConfig = {};
+	const model = normalizeModel(value.model);
+	if (model) stage.model = model;
+	if (isThinkingLevel(value.thinking)) stage.thinking = value.thinking;
+	if (isDropperStageMode(value.mode)) stage.mode = value.mode;
+	const jev = normalizeJevDropperConfig(value.jev);
+	if (jev) stage.jev = jev;
+	return stage.model !== undefined || stage.thinking !== undefined || stage.mode !== undefined || stage.jev !== undefined ? stage : undefined;
+}
+
 function normalizeSettingsConfig(value: Record<string, unknown>): Partial<Config> {
 	const normalized: Partial<Config> = {};
 	const numberKeys = [
@@ -251,10 +303,12 @@ function normalizeSettingsConfig(value: Record<string, unknown>): Partial<Config
 	if (compactionTrigger) normalized.compactionTrigger = compactionTrigger;
 	const model = normalizeModel(value.model);
 	if (model) normalized.model = model;
-	for (const stageName of ["observer", "reflector", "dropper"] as const) {
-		const stage = normalizeStageConfig(value[stageName]);
-		if (stage) normalized[stageName] = stage;
-	}
+	const observerStage = normalizeStageConfig(value.observer);
+	if (observerStage) normalized.observer = observerStage;
+	const reflectorStage = normalizeStageConfig(value.reflector);
+	if (reflectorStage) normalized.reflector = reflectorStage;
+	const dropperStage = normalizeDropperStageConfig(value.dropper);
+	if (dropperStage) normalized.dropper = dropperStage;
 	return normalized;
 }
 
@@ -280,6 +334,35 @@ export function resolveStageModel(
 	stage: StageName,
 ): { model?: ConfiguredModel; thinking: ModelThinkingLevel } {
 	return { model: resolveStageModelConfig(config, stage), thinking: resolveStageThinking(config, stage) };
+}
+
+/** Environment variable read for the System One API key when no override is configured. */
+export const DEFAULT_JEV_API_KEY_ENV = "TYPESAFE_API_KEY";
+
+/** Dropper Jev settings resolved to their effective values, with the API key read from env once. */
+export interface ResolvedJevDropperConfig {
+	mode: DropperStageMode;
+	modelId: string;
+	apiKeyEnv: string;
+	/** API key read (and trimmed) from env[apiKeyEnv]; undefined when absent or blank. */
+	apiKey?: string;
+}
+
+/**
+ * Resolve the dropper's Jev settings with defaults applied, reading the API key
+ * from env at the same time so callers need exactly one lookup.
+ */
+export function resolveJevDropperConfig(config: Config, env: NodeJS.ProcessEnv = process.env): ResolvedJevDropperConfig {
+	const dropper = config.dropper;
+	const jev = dropper?.jev;
+	const apiKeyEnv = jev?.apiKeyEnv ?? DEFAULT_JEV_API_KEY_ENV;
+	const apiKey = env[apiKeyEnv]?.trim() || undefined;
+	return {
+		mode: dropper?.mode ?? "llm",
+		modelId: jev?.modelId ?? DEFAULT_JEV_MODEL_ID,
+		apiKeyEnv,
+		apiKey,
+	};
 }
 
 export function readEnvConfig(env: NodeJS.ProcessEnv = process.env): Partial<Config> {

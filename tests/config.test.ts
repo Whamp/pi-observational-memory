@@ -11,9 +11,11 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
 
 import {
 	DEFAULTS,
+	DEFAULT_JEV_API_KEY_ENV,
 	loadConfig,
 	readEnvConfig,
 	resolveCompactAfterTokens,
+	resolveJevDropperConfig,
 	resolveStageModel,
 } from "../src/config.js";
 
@@ -230,6 +232,69 @@ describe("V3 config", () => {
 		expect(readEnvConfig({ PI_OBSERVATIONAL_MEMORY_PASSIVE: "on" })).toEqual({ passive: true });
 		expect(readEnvConfig({ PI_OBSERVATIONAL_MEMORY_PASSIVE: "0" })).toEqual({ passive: false });
 		expect(readEnvConfig({ PI_OBSERVATIONAL_MEMORY_PASSIVE: "maybe" })).toEqual({});
+	});
+
+	describe("dropper stage mode and Jev settings", () => {
+		it("parses dropper mode, model, thinking, and jev settings", () => {
+			writeJson(join(cwd, ".pi", "settings.json"), {
+				"observational-memory": {
+					dropper: {
+						mode: "jev",
+						thinking: "low",
+						jev: { modelId: "jev-2.0.0", apiKeyEnv: "MY_JEV_KEY" },
+					},
+				},
+			});
+
+			const config = loadConfig(cwd, {});
+
+			expect(config.dropper).toEqual({
+				mode: "jev",
+				thinking: "low",
+				jev: { modelId: "jev-2.0.0", apiKeyEnv: "MY_JEV_KEY" },
+			});
+			expect(resolveJevDropperConfig(config, { MY_JEV_KEY: "  secret  " })).toEqual({
+				mode: "jev",
+				modelId: "jev-2.0.0",
+				apiKeyEnv: "MY_JEV_KEY",
+				apiKey: "secret",
+			});
+		});
+
+		it("drops invalid dropper mode and jev fields but keeps valid siblings", () => {
+			writeJson(join(cwd, ".pi", "settings.json"), {
+				"observational-memory": {
+					dropper: {
+						mode: "agentic",
+						jev: { modelId: 3, apiKeyEnv: "" },
+						model: { provider: "anthropic", id: "claude" },
+					},
+				},
+			});
+
+			expect(loadConfig(cwd, {}).dropper).toEqual({ model: { provider: "anthropic", id: "claude" } });
+		});
+
+		it("keeps a dropper stage that only carries jev settings", () => {
+			writeJson(join(cwd, ".pi", "settings.json"), {
+				"observational-memory": {
+					dropper: { jev: { apiKeyEnv: "OTHER_JEV_KEY" } },
+				},
+			});
+
+			expect(loadConfig(cwd, {}).dropper).toEqual({ jev: { apiKeyEnv: "OTHER_JEV_KEY" } });
+		});
+
+		it("resolves Jev defaults and reads the key from the default env var", () => {
+			expect(resolveJevDropperConfig(DEFAULTS, { [DEFAULT_JEV_API_KEY_ENV]: "key-1" })).toEqual({
+				mode: "llm",
+				modelId: "jev-1.13.0",
+				apiKeyEnv: "TYPESAFE_API_KEY",
+				apiKey: "key-1",
+			});
+			expect(resolveJevDropperConfig(DEFAULTS, {}).apiKey).toBeUndefined();
+			expect(resolveJevDropperConfig(DEFAULTS, { [DEFAULT_JEV_API_KEY_ENV]: "   " }).apiKey).toBeUndefined();
+		});
 	});
 
 	describe("compactAfterTokens ratio mode", () => {
