@@ -288,6 +288,7 @@ on the `Next compaction` line regardless of mode.
 | `compactionTrigger`         | `"agentSettled"` | `"agentSettled"` enables proactive compaction from Pi's native settled lifecycle; `"native"` disables the extension trigger while retaining the compaction hook. Legacy fork values map to `"agentSettled"`. |
 | `model`                     | session model | Optional shared memory-worker model override: `{ provider, id, thinking }`.                       |
 | `observer`, `reflector`, `dropper` | unset | Optional per-stage `{ model, thinking }` overrides. Dropper inherits the reflector model/thinking before the shared model. |
+| `dropper.mode` | `"llm"` | Dropper decision engine: `"llm"` (agent loop) or `"jev"` (TypeSafe System One, one noul per observation, LLM fallback). Configured via `dropper.jev`; key from `TYPESAFE_API_KEY`. |
 | `showWorkerNotifications`   | `true`        | Shows routine observer, reflector, and dropper progress notifications. Warnings and errors are unaffected. |
 | `passive`                   | `false`       | Disables proactive background observation, reflection, maintenance, and auto-compaction triggers. |
 | `debugLog`                  | `false`       | Writes opt-in per-session extension debug events to Pi's agent directory.                         |

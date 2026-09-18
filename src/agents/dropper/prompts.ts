@@ -1,3 +1,18 @@
+import type { JevNoulCriteria } from "../../jev/client.js";
+
+/** Shared briefing framing what dropping means (active memory only) and the keep-when-unsure bias. */
+export const JEV_DROP_CONTEXT = "A coding assistant's durable memory is being compacted. The active observation pool is over its token target, and each question asks whether one observation can safely leave active memory. Dropped observations are only removed from active memory; the raw conversation history stays in the ledger, and known ids remain recallable. When unsure, keep the observation.";
+
+export function jevDropInstruction(id: string): string {
+	return `Observation \`${id}\` can be dropped from active durable memory without losing value for the ongoing work.`;
+}
+
+/** Preservation floor for Jev's literal reading; an alignment test keeps this and DROPPER_SYSTEM together. */
+export const JEV_DROP_CRITERIA: JevNoulCriteria = {
+	true: "Routine, superseded, or already fully captured by a reflection or a newer observation, and carrying no unique durable fact. Dropping it loses no user preference, constraint, correction, decision or rationale, concrete completion, identifier, file path, exact error, date, deadline, blocker, TODO, or non-standard term that future work depends on.",
+	false: "It uniquely carries a durable fact future work depends on: a user preference, constraint, correction, decision, concrete completion that must not be redone, identifier or path, exact error or diagnostic, date or deadline, current blocker, TODO, or non-standard term. Its meaning is not preserved anywhere else.",
+};
+
 export const DROPPER_SYSTEM = `You are the dropper agent for a coding assistant.
 
 These records are the ONLY information the assistant will have about past interactions once the raw conversation is compacted out of context. Dropping the wrong observation can make future work repeat, contradict, or misremember the user. Take this seriously.

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 
 const mockAgents = vi.hoisted(() => ({
 	runObserver: vi.fn(),
@@ -11,10 +11,14 @@ vi.mock("../src/agents/observer/agent.js", async (importOriginal) => ({
 	runObserver: mockAgents.runObserver,
 }));
 vi.mock("../src/agents/reflector/agent.js", () => ({ runReflector: mockAgents.runReflector }));
-vi.mock("../src/agents/dropper/agent.js", () => ({ runDropper: mockAgents.runDropper }));
+vi.mock("../src/agents/dropper/agent.js", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../src/agents/dropper/agent.js")>()),
+	runDropper: mockAgents.runDropper,
+}));
 
 import { ObserverStreamError } from "../src/agents/observer/agent.js";
-import { registerConsolidationTrigger } from "../src/hooks/consolidation-trigger.js";
+import { registerConsolidationTrigger, type ConsolidationDeps } from "../src/hooks/consolidation-trigger.js";
+import { createJevClient, JevRequestError, type JevAskRequest, type JevClient } from "../src/jev/client.js";
 import {
 	OM_OBSERVER_COMPLETED,
 	OM_OBSERVATIONS_DROPPED,
@@ -41,6 +45,10 @@ beforeEach(() => {
 	mockAgents.runDropper.mockResolvedValue(undefined);
 });
 
+afterEach(() => {
+	vi.unstubAllEnvs();
+});
+
 function setup(args: {
 	entries: TestEntry[];
 	observeAfterTokens?: number;
@@ -53,7 +61,7 @@ function setup(args: {
 	consolidationInFlight?: boolean;
 	appendEntryReturnsId?: boolean;
 	sessionId?: string;
-}) {
+}, deps?: ConsolidationDeps) {
 	let entries = [...args.entries];
 	let sessionId = args.sessionId ?? "session-1";
 	const handlers: Record<string, ((event: unknown, ctx: any) => void) | undefined> = {};
@@ -104,7 +112,7 @@ function setup(args: {
 			return message;
 		}),
 	};
-	registerConsolidationTrigger(pi as any, runtime as any);
+	registerConsolidationTrigger(pi as any, runtime as any, deps);
 	if (!handlers.agent_start) throw new Error("agent_start consolidation handler not registered");
 	if (!handlers.turn_end) throw new Error("turn_end consolidation handler not registered");
 	const ctx = {
@@ -898,5 +906,149 @@ describe("observer chunk cap", () => {
 
 		expect(mockAgents.runObserver).toHaveBeenCalledWith(expect.objectContaining({ allowedSourceEntryIds: ["raw-1"] }));
 		expect(pi.appendEntry).toHaveBeenCalledWith(OM_OBSERVATIONS_RECORDED, expect.objectContaining({ coversUpToId: "raw-1" }));
+	});
+});
+
+describe("dropper Jev mode", () => {
+	const obsA = observation("aaaaaaaaaaaa", { sourceEntryIds: ["raw-1"], tokenCount: 10 });
+	const obsB = observation("bbbbbbbbbbbb", { sourceEntryIds: ["raw-3"], tokenCount: 10 });
+	const refA = reflection("ffffffffffff", ["aaaaaaaaaaaa"]);
+
+	function stubClient(noulFor: (request: JevAskRequest) => number): JevClient {
+		return {
+			askNouls: async (request) => {
+				const answers = new Map<string, number>();
+				for (const id of Object.keys(request.questions)) answers.set(id, noulFor(request));
+				return { answers, usage: { inputTokens: 100, outputTokens: 0 } };
+			},
+		};
+	}
+
+	function failingClient(error: unknown): JevClient {
+		return {
+			askNouls: async () => {
+				throw error;
+			},
+		};
+	}
+
+	function jevEntries(): TestEntry[] {
+		return [
+			textCustomMessage("raw-1", "aaaaaaaa"),
+			observationsRecordedEntry("om-obs", { observations: [obsA], coversUpToId: "raw-1" }),
+			textCustomMessage("raw-2", "bbbbbbbb"),
+		];
+	}
+
+	it("keeps LLM dropper behavior when no mode is configured", async () => {
+		mockAgents.runReflector.mockResolvedValueOnce([refA]);
+		mockAgents.runDropper.mockResolvedValueOnce(["aaaaaaaaaaaa"]);
+		const createJevClient = vi.fn(() => stubClient(() => 0.9));
+		const view = setup({ entries: jevEntries(), observeAfterTokens: 999, observationsPoolTargetTokens: 5 }, { createJevClient });
+
+		view.fire();
+		await view.runLaunchedWork();
+
+		expect(createJevClient).not.toHaveBeenCalled();
+		expect(mockAgents.runDropper).toHaveBeenCalledOnce();
+		expect(view.pi.appendEntry).toHaveBeenCalledWith(OM_OBSERVATIONS_DROPPED, { observationIds: ["aaaaaaaaaaaa"], coversUpToId: "raw-1" });
+	});
+
+	it("uses Jev in jev mode and appends drops without the LLM dropper", async () => {
+		vi.stubEnv("TYPESAFE_API_KEY", "test-key");
+		mockAgents.runReflector.mockResolvedValueOnce([refA]);
+		const createJevClient = vi.fn(() => stubClient(() => 0.9));
+		const view = setup({ entries: jevEntries(), observeAfterTokens: 999, observationsPoolTargetTokens: 5 }, { createJevClient });
+		(view.runtime.config as any).dropper = { mode: "jev" };
+
+		view.fire();
+		await view.runLaunchedWork();
+
+		expect(createJevClient).toHaveBeenCalledWith({ apiKey: "test-key", modelId: "jev-1.13.0" });
+		expect(mockAgents.runDropper).not.toHaveBeenCalled();
+		expect(view.pi.appendEntry).toHaveBeenCalledWith(OM_OBSERVATIONS_DROPPED, { observationIds: ["aaaaaaaaaaaa"], coversUpToId: "raw-1" });
+	});
+
+	it("treats a zero-drop Jev success as a normal outcome", async () => {
+		vi.stubEnv("TYPESAFE_API_KEY", "test-key");
+		mockAgents.runReflector.mockResolvedValueOnce([refA]);
+		const createJevClient = vi.fn(() => stubClient(() => 0.3));
+		const view = setup({ entries: jevEntries(), observeAfterTokens: 999, observationsPoolTargetTokens: 5 }, { createJevClient });
+		(view.runtime.config as any).dropper = { mode: "jev" };
+
+		view.fire();
+		await view.runLaunchedWork();
+
+		expect(createJevClient).toHaveBeenCalledOnce();
+		expect(mockAgents.runDropper).not.toHaveBeenCalled();
+		expect(view.pi.appendEntry).not.toHaveBeenCalledWith(OM_OBSERVATIONS_DROPPED, expect.anything());
+		expect(view.ctx.ui.notify).not.toHaveBeenCalledWith(expect.stringContaining("LLM fallback"), expect.anything());
+	});
+
+	it("falls back to the LLM dropper and notifies once when Jev fails", async () => {
+		vi.stubEnv("TYPESAFE_API_KEY", "test-key");
+		mockAgents.runReflector.mockResolvedValueOnce([refA]);
+		mockAgents.runDropper.mockResolvedValueOnce(["aaaaaaaaaaaa"]);
+		const createJevClient = vi.fn(() => failingClient(new JevRequestError("rate_limited", "jev.ask_rate_limited: test", true)));
+		const view = setup({ entries: jevEntries(), observeAfterTokens: 999, observationsPoolTargetTokens: 5 }, { createJevClient });
+		(view.runtime.config as any).dropper = { mode: "jev" };
+
+		view.fire();
+		await view.runLaunchedWork();
+
+		expect(createJevClient).toHaveBeenCalledOnce();
+		expect(mockAgents.runDropper).toHaveBeenCalledOnce();
+		expect(view.ctx.ui.notify).toHaveBeenCalledWith(
+			"Observational memory: dropper using LLM fallback — Jev unavailable (rate_limited)",
+			"warning",
+		);
+		expect(view.pi.appendEntry).toHaveBeenCalledWith(OM_OBSERVATIONS_DROPPED, { observationIds: ["aaaaaaaaaaaa"], coversUpToId: "raw-1" });
+	});
+
+	it("falls back when the API key env var is missing", async () => {
+		vi.stubEnv("TYPESAFE_API_KEY", undefined);
+		mockAgents.runReflector.mockResolvedValueOnce([refA]);
+		mockAgents.runDropper.mockResolvedValueOnce(["aaaaaaaaaaaa"]);
+		const createJevClient = vi.fn(() => stubClient(() => 0.9));
+		const view = setup({ entries: jevEntries(), observeAfterTokens: 999, observationsPoolTargetTokens: 5 }, { createJevClient });
+		(view.runtime.config as any).dropper = { mode: "jev" };
+
+		view.fire();
+		await view.runLaunchedWork();
+
+		expect(createJevClient).not.toHaveBeenCalled();
+		expect(mockAgents.runDropper).toHaveBeenCalledOnce();
+		expect(view.ctx.ui.notify).toHaveBeenCalledWith(
+			"Observational memory: dropper using LLM fallback — Jev unavailable (missing_api_key)",
+			"warning",
+		);
+	});
+
+	it("does not repeat the Jev fallback notification on later runs", async () => {
+		vi.stubEnv("TYPESAFE_API_KEY", "test-key");
+		mockAgents.runObserver
+			.mockResolvedValueOnce({ outcome: "recorded", observations: [obsA] })
+			.mockResolvedValueOnce({ outcome: "recorded", observations: [obsB] });
+		mockAgents.runReflector.mockResolvedValue([refA]);
+		mockAgents.runDropper.mockResolvedValue(["aaaaaaaaaaaa"]);
+		const createJevClient = vi.fn(() => failingClient(new JevRequestError("overloaded", "jev.ask_overloaded: test", true)));
+		const view = setup({ entries: [textCustomMessage("raw-1", "aaaaaaaa")], observationsPoolTargetTokens: 5 }, { createJevClient });
+		(view.runtime.config as any).dropper = { mode: "jev" };
+
+		view.fire();
+		await view.runLaunchedWork();
+
+		view.addEntries(
+			textCustomMessage("raw-3", "cccccccc"),
+			observationsRecordedEntry("om-obs-2", { observations: [obsB], coversUpToId: "raw-3" }),
+		);
+		view.runtime.consolidationInFlight = false;
+		view.fire();
+		await view.runLaunchedWork();
+
+		expect(createJevClient).toHaveBeenCalledTimes(2);
+		expect(mockAgents.runDropper).toHaveBeenCalledTimes(2);
+		const fallbackNotifies = view.ctx.ui.notify.mock.calls.filter((call) => String(call[0]).includes("LLM fallback"));
+		expect(fallbackNotifies).toHaveLength(1);
 	});
 });

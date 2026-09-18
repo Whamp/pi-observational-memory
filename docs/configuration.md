@@ -66,11 +66,14 @@ You can omit everything. Defaults work for ordinary sessions, and if `model` is 
 | `agentMaxTokens` | positive integer | `32000` | Maximum output tokens requested for memory-agent loops. Clamped to the model's own `maxTokens` when available. Lower it for local servers with a modest context window. |
 | `compactionTrigger` | enum | `"agentSettled"` | `"agentSettled"` enables proactive compaction from Pi's settled lifecycle; `"native"` leaves timing to Pi. |
 | `model` | object | unset | Optional shared model override for observer, reflector, and dropper. |
-| `observer`, `reflector`, `dropper` | object | unset | Optional per-stage `{ model, thinking }` overrides. |
+| `observer`, `reflector`, `dropper` | object | unset | Optional per-stage overrides. `observer` and `reflector` take `{ model, thinking }`; `dropper` also takes `mode` and `jev`. |
 | `model.provider` | string | unset | Provider name in Pi's model registry. Required when `model` is set. |
 | `model.id` | string | unset | Model id in Pi's model registry. Required when `model` is set. |
 | `model.thinking` | enum | unset; workers fall back to `low` | Optional reasoning/thinking level for memory workers. |
 | `showWorkerNotifications` | boolean | `true` | Shows routine observer, reflector, and dropper progress notifications. |
+| `dropper.mode` | enum | `"llm"` | Dropper decision engine. `"llm"` runs the agent-loop dropper; `"jev"` asks TypeSafe System One one noul per active observation and falls back to `"llm"` when Jev is unavailable. |
+| `dropper.jev.modelId` | string | `"jev-1.13.0"` | Pinned System One model id used when `dropper.mode` is `"jev"`. |
+| `dropper.jev.apiKeyEnv` | string | `"TYPESAFE_API_KEY"` | Environment variable read for the System One API key. The key is never stored in settings. |
 | `passive` | boolean | `false` | Disables proactive background memory and auto-compaction triggers. |
 | `debugLog` | boolean | `false` | Writes best-effort per-session extension debug events to Pi's agent directory. |
 
@@ -136,6 +139,34 @@ Dropper input includes deterministic reflection coverage evidence for every acti
 
 This target does not affect compaction full-fold pressure. Visible compaction pressure remains based on `observationsPoolMaxTokens`.
 
+## `dropper.mode`
+
+Default: `"llm"`.
+
+This selects the dropper's decision engine:
+
+* `"llm"` (default): the dropper runs its LLM agent loop with the `drop_observations` tool, as before.
+* `"jev"`: the dropper asks TypeSafe System One (Jev) one graded noul question per active observation — "can this observation safely leave active memory". Nouls at or above the code-tuned threshold (`0.8`) become drop proposals and feed the same deterministic ranking (reflection coverage, relevance, age, per-run cap) as the LLM path.
+
+Jev requests carry the pool briefing, reflection summary lines, and per-observation facts (id, content, relevance, coverage tier, age in minutes). Requests are chunked to stay under the System One 32k state limit; a single observation too large for any chunk fails the Jev run and falls back to `"llm"`.
+
+Fallback is all-or-nothing per run: any transport failure (bad key, rate limit, overload, timeout, malformed response, oversized state) drops nothing from Jev and hands the run to the LLM dropper. The first fallback in a session notifies once — `Observational memory: dropper using LLM fallback — Jev unavailable (<reason>)` — and later fallbacks only log `dropper.jev_fallback` when `debugLog` is on.
+
+## `dropper.jev`
+
+Optional System One settings used when `dropper.mode` is `"jev"`:
+
+* `modelId` — defaults to `"jev-1.13.0"`, the pinned id the drop threshold is tuned against.
+* `apiKeyEnv` — name of the environment variable holding the System One API key; defaults to `"TYPESAFE_API_KEY"`.
+
+The API key is read from the environment, never from settings files:
+
+```bash
+TYPESAFE_API_KEY=... pi
+```
+
+The model and thinking overrides (`dropper.model`, `dropper.thinking`) still apply to the LLM fallback path in `"jev"` mode.
+
 ## `agentMaxTurns`
 
 Default: `16`.
@@ -170,7 +201,7 @@ Set `model` when you want all three stages to use a cheaper or faster model than
 }
 ```
 
-Each of `observer`, `reflector`, and `dropper` may also provide `{ "model": { "provider": "…", "id": "…" }, "thinking": "…" }`. Observer and reflector fall back to the shared model. Dropper falls back through reflector, then shared. Stage settings use the same provider/authentication/environment/base-URL path as every other memory model.
+Each of `observer`, `reflector`, and `dropper` may also provide `{ "model": { "provider": "…", "id": "…" }, "thinking": "…" }`. Observer and reflector fall back to the shared model. Dropper falls back through reflector, then shared. The dropper additionally accepts `mode` and `jev` settings for the Jev decision engine; see [`dropper.mode`](#droppermode). Stage settings use the same provider/authentication/environment/base-URL path as every other memory model.
 
 `provider` and `id` must both be non-empty strings. `thinking` is optional. If the configured model cannot be resolved, the runtime attempts to fall back to the current session model and notifies once. Memory workers accept either an API key or OAuth-style auth headers (e.g. `Authorization: Bearer …`), so OAuth-authenticated providers work without an API key. If no usable model or credentials are available, the relevant background worker skips/fails safely rather than inventing memory.
 

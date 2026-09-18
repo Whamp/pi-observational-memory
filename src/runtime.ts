@@ -105,6 +105,7 @@ export class Runtime {
 	compactInFlight = false;
 	compactHookInFlight = false;
 	resolveFailureNotified = false;
+	jevFallbackNotified = false;
 	lastObserverError: string | undefined;
 	lastReflectorError: string | undefined;
 	lastDropperError: string | undefined;
