@@ -257,6 +257,8 @@ grep '"event":"dropper' ~/.pi/agent/observational-memory/debug/<session-id>.ndjs
 
 Look for `dropper.result`: `no_tool_call` means the model chose not to drop anything, `all_filtered` means proposed ids were unusable, and `selected_nonempty` means usable drops were selected before append handling.
 
+The compaction hook writes one `compaction.hook_result` row per call. Its `reason` is `duplicate-suppressed`, `host-owned`, `empty-summary`, or `rendered`. A `rendered` row carries the summary size in characters and estimated tokens, split by section. A `host-owned` row names the authority reason, so a compaction handed to Pi's own summarizer is no longer silent.
+
 Debug logs are opt-in local debugging artifacts. By default, diagnostic events should record aggregate counts, token totals, ids, file paths, errors, and project details rather than observation/reflection content, prompts, model responses, or raw model-proposed drop ids. Treat debug files as sensitive local artifacts.
 
 Debug-log write failures do not change memory behavior.

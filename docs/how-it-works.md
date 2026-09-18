@@ -292,6 +292,8 @@ When exact source context is needed for precision or traceability, use the recal
 
 The renderer is deterministic. It does not call a model and does not rewrite memory content.
 
+`renderSummarySections` returns the rendered text and its size in exact characters and estimated tokens. The estimate is `ceil(chars / 4)`, the same estimate used for pool budgets and progress clocks. It measures the whole summary and each part separately, so the fixed usage instructions, the reflections section, and the observations section each report their own size. The whole-text size counts the fixed usage instructions and the blank lines between parts, so the part sizes sum to less than the total. The fixed instructions are 900 characters, about 225 estimated tokens. They dominate a short summary. `/om:status` reports the size of the last stored compaction summary, including one Pi produced on its own.
+
 ## Commands
 
 ### `/om:status`
@@ -305,6 +307,7 @@ Shows:
 - active observation pool pressure against `observationsPoolTargetTokens` from folded active observations;
 - dropper state explaining whether the active pool is under target or waiting for the next successful reflection;
 - reflection pool token total;
+- size of the last stored compaction summary in estimated tokens and characters, when the branch has one;
 - passive mode;
 - worker in-flight flags;
 - last observer and reflect/drop errors.
