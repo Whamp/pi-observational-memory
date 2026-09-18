@@ -145,30 +145,36 @@ function finiteNumberOrUndefined(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+type JevParseOutcome = { ok: true; result: JevAskResult } | { ok: false; reason: string };
+
 /**
- * Parse the System One 200 body into one noul per requested id. Returns
- * undefined when any requested id is missing, any noul is missing or outside
- * [0,1], or usage is absent/malformed — the boundary refuses partial answers.
+ * Parse the System One 200 body into one noul per requested id. Fails with a
+ * diagnostic reason when any requested id is missing, any noul is missing or
+ * outside [0,1], or usage is absent/malformed — the boundary refuses partial
+ * answers and names the refusal so the failure is diagnosable from the log.
  */
-function parseJevAnswers(text: string, requestedIds: readonly string[]): JevAskResult | undefined {
+function parseJevAnswers(text: string, requestedIds: readonly string[]): JevParseOutcome {
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(text);
-	} catch {
-		return undefined;
+	} catch (error) {
+		return { ok: false, reason: error instanceof Error ? error.message : String(error) };
 	}
-	if (!isRecord(parsed) || !isRecord(parsed.answers) || !isRecord(parsed.usage)) return undefined;
+	if (!isRecord(parsed) || !isRecord(parsed.answers) || !isRecord(parsed.usage)) {
+		return { ok: false, reason: "body is not an object with answers and usage" };
+	}
 	const inputTokens = finiteNumberOrUndefined(parsed.usage.input_tokens);
 	const outputTokens = finiteNumberOrUndefined(parsed.usage.output_tokens);
-	if (inputTokens === undefined || outputTokens === undefined) return undefined;
+	if (inputTokens === undefined || outputTokens === undefined) return { ok: false, reason: "usage tokens missing or non-numeric" };
 	const answers = new Map<string, number>();
 	for (const id of requestedIds) {
 		const entry = parsed.answers[id];
 		const noul = isRecord(entry) ? finiteNumberOrUndefined(entry.noul) : undefined;
-		if (noul === undefined || noul < 0 || noul > 1) return undefined;
+		if (noul === undefined) return { ok: false, reason: `answer for ${id} missing or non-numeric` };
+		if (noul < 0 || noul > 1) return { ok: false, reason: `answer for ${id} outside [0,1]` };
 		answers.set(id, noul);
 	}
-	return { answers, usage: { inputTokens, outputTokens } };
+	return { ok: true, result: { answers, usage: { inputTokens, outputTokens } } };
 }
 
 /** Parse a 429 Retry-After header in seconds; HTTP-date form falls back to backoff. */
@@ -268,11 +274,11 @@ export function createJevClient(options: JevClientOptions): JevClient {
 				});
 				const text = await response.text();
 				if (response.ok) {
-					const result = parseJevAnswers(text, requestedIds);
-					if (result) return result;
+					const parsed = parseJevAnswers(text, requestedIds);
+					if (parsed.ok) return parsed.result;
 					lastError = new JevRequestError(
 						"malformed_response",
-						"jev.ask_malformed_response: System One response did not match the noul contract",
+						`jev.ask_malformed_response: System One response did not match the noul contract (${parsed.reason})`,
 						false,
 					);
 				} else {
