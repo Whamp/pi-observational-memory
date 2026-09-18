@@ -194,6 +194,44 @@ describe("V3 /om:status", () => {
 		expect(output).not.toContain("Consolidation: running (");
 	});
 
+	it("reports the size of the last stored compaction summary under the reflection pool line", async () => {
+		const entries = [
+			textCustomMessage("raw-1", "aaaaaaaa"),
+			compactionEntry("cmp-first", { firstKeptEntryId: "raw-1", summary: "First compaction summary for this session." }),
+			textCustomMessage("raw-2", "bbbbbbbb"),
+			compactionEntry("cmp-second", { firstKeptEntryId: "raw-2", summary: "Second compaction summary for this session with more detail." }),
+		];
+
+		const output = await setup({ entries }).run();
+		const lines = output.split("\n");
+		const reflectionPoolLine = lines.findIndex((line) => line.startsWith("Reflection pool:"));
+
+		expect(reflectionPoolLine).toBeGreaterThanOrEqual(0);
+		expect(lines[reflectionPoolLine + 1]).toBe("Last compaction summary: ~15 tokens (60 chars)");
+	});
+
+	it("omits the compaction summary line when the compaction entry stored no summary", async () => {
+		const entries = [
+			textCustomMessage("raw-1", "aaaaaaaa"),
+			compactionEntry("cmp-blank", { firstKeptEntryId: "raw-1", summary: "" }),
+		];
+
+		const output = await setup({ entries }).run();
+
+		expect(output).not.toContain("Last compaction summary:");
+	});
+
+	it("omits the compaction summary line before the first compaction", async () => {
+		const entries = [
+			textCustomMessage("raw-1", "aaaaaaaa"),
+			observationsRecordedEntry("om-obs", { observations: [observation("aaaaaaaaaaaa", { tokenCount: 5 })], coversUpToId: "raw-1" }),
+		];
+
+		const output = await setup({ entries }).run();
+
+		expect(output).not.toContain("Last compaction summary:");
+	});
+
 	describe("ratio mode", () => {
 		it("shows the context-window-scaled threshold in the Next compaction line", async () => {
 			const output = await setup({

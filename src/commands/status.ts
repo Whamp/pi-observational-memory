@@ -6,6 +6,7 @@ import {
 	diffProjection,
 	foldLedger,
 	fullProjection,
+	measureRenderedText,
 	rawTokensSinceLastCompaction,
 	rawTokensSinceObservationCoverage,
 	rawTokensSinceReflectionCoverage,
@@ -32,6 +33,20 @@ function removedSuffix(count: number): string | undefined {
 function appendSuffixes(line: string, suffixes: (string | undefined)[]): string {
 	const rendered = suffixes.filter((suffix): suffix is string => suffix !== undefined);
 	return rendered.length > 0 ? `${line} ${rendered.join(" ")}` : line;
+}
+
+/**
+ * Finds the `summary` of the newest compaction entry on the branch. Pi writes this
+ * field for its own compactions too, so the reported size can cover memory this
+ * extension did not render.
+ */
+function latestStoredCompactionSummary(entries: Entry[]): string | undefined {
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const entry = entries[index];
+		if (entry?.type !== "compaction") continue;
+		if (typeof entry.summary === "string" && entry.summary.length > 0) return entry.summary;
+	}
+	return undefined;
 }
 
 export function registerStatusCommand(pi: ExtensionAPI, runtime: Runtime): void {
@@ -87,6 +102,12 @@ export function registerStatusCommand(pi: ExtensionAPI, runtime: Runtime): void 
 				`Active observation pool: ~${activeObservationPool.observationTokens.toLocaleString()} / ${runtime.config.observationsPoolTargetTokens.toLocaleString()} target tokens (${pct(activeObservationPool.observationTokens, runtime.config.observationsPoolTargetTokens)}%)`,
 				`Reflection pool:         ~${visibleReflectionTokens.toLocaleString()} tokens`,
 			];
+
+			const storedSummary = latestStoredCompactionSummary(entries);
+			if (storedSummary) {
+				const size = measureRenderedText(storedSummary);
+				lines.push(`Last compaction summary: ~${size.estimatedTokens.toLocaleString()} tokens (${size.chars.toLocaleString()} chars)`);
+			}
 
 			if (runtime.consolidationInFlight || runtime.compactInFlight || runtime.compactHookInFlight) {
 				lines.push("", "── In flight ──");
