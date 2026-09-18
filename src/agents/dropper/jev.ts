@@ -27,8 +27,9 @@ export const JEV_DROP_NOUL_THRESHOLD = 0.8;
 export const JEV_CHUNK_TARGET_TOKENS = 24_000;
 
 /**
- * ageMinutes value reported for observations whose timestamp cannot be parsed;
- * sorts them last (oldest-first ordering).
+ * ageMinutes value reported for observations whose timestamp cannot be parsed.
+ * It is the largest age, so unparseable observations lead the oldest-first state
+ * as ancient.
  */
 export const JEV_UNPARSEABLE_AGE_MINUTES = 1_000_000_000;
 
