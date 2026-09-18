@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { registerCompactionHook } from "../src/hooks/compaction-hook.js";
+import type { DebugLogContext } from "../src/debug-log.js";
 import {
 	compactionEntry,
 	memoryDetails,
@@ -16,7 +17,25 @@ import {
 	type TestEntry,
 } from "./fixtures/session.js";
 
-function setup(args: { entries: TestEntry[]; observationsPoolMaxTokens?: number; compactHookInFlight?: boolean }) {
+const debugCapture = vi.hoisted(() => ({
+	rows: [] as Array<{ event: string; data: Record<string, unknown> }>,
+	contexts: [] as DebugLogContext[],
+}));
+
+vi.mock("../src/debug-log.js", async (importOriginal) => ({
+	...await importOriginal<typeof import("../src/debug-log.js")>(),
+	withDebugLogContext: <T,>(context: DebugLogContext, fn: () => T): T => {
+		debugCapture.contexts.push(context);
+		return fn();
+	},
+	debugLog: (event: string, data: Record<string, unknown> = {}) => {
+		debugCapture.rows.push({ event, data });
+	},
+}));
+
+function setup(args: { entries: TestEntry[]; observationsPoolMaxTokens?: number; compactHookInFlight?: boolean; debugLog?: boolean }) {
+	const firstRow = debugCapture.rows.length;
+	const firstContext = debugCapture.contexts.length;
 	let handler: ((event: unknown, ctx: unknown) => Promise<unknown>) | undefined;
 	const pi = {
 		on: vi.fn((eventName: string, cb: typeof handler) => {
@@ -28,6 +47,7 @@ function setup(args: { entries: TestEntry[]; observationsPoolMaxTokens?: number;
 	const runtime = {
 		config: {
 			observationsPoolMaxTokens: args.observationsPoolMaxTokens ?? 20_000,
+			debugLog: args.debugLog,
 		},
 		compactHookInFlight: args.compactHookInFlight ?? false,
 		observerPromise: new Promise(() => {}),
@@ -49,7 +69,14 @@ function setup(args: { entries: TestEntry[]; observationsPoolMaxTokens?: number;
 		branchEntries: args.entries,
 		signal: undefined,
 	}, ctx);
-	return { pi, runtime, ctx, run };
+	return {
+		pi,
+		runtime,
+		ctx,
+		run,
+		debugRows: () => debugCapture.rows.slice(firstRow),
+		debugContexts: () => debugCapture.contexts.slice(firstContext),
+	};
 }
 
 describe("V3 compaction hook", () => {
@@ -249,5 +276,83 @@ describe("V3 compaction hook", () => {
 			"Observational memory: another compaction is already in progress; cancelling duplicate",
 			"warning",
 		);
+	});
+
+	it("logs the rendered summary size for one compaction it owns", async () => {
+		const obs1 = observation("aaaaaaaaaaaa", { sourceEntryIds: ["raw-1"], tokenCount: 10 });
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			observationsRecordedEntry("om-aaaaaaaaaaaa", { observations: [obs1], coversUpToId: "raw-1" }),
+			textCustomMessage("raw-2", "bbbb"),
+		];
+		const { run, debugRows, debugContexts } = setup({ entries, debugLog: true });
+
+		await run("raw-2");
+
+		expect(debugContexts()).toEqual([{ enabled: true, cwd: "/tmp/project" }]);
+		expect(debugRows()).toEqual([
+			{
+				event: "compaction.hook_result",
+				data: {
+					reason: "rendered",
+					fullFold: false,
+					tokensBefore: 123,
+					firstKeptEntryId: "raw-2",
+					observationCount: 1,
+					reflectionCount: 0,
+					size: { chars: 991, estimatedTokens: 248 },
+					sections: {
+						instructions: { chars: 900, estimatedTokens: 225 },
+						reflections: { chars: 0, estimatedTokens: 0 },
+						observations: { chars: 89, estimatedTokens: 23 },
+					},
+				},
+			},
+		]);
+	});
+
+	it("logs one host-owned outcome with the authority reason", async () => {
+		const entries = [
+			textCustomMessage("raw-1", "pruned source"),
+			textCustomMessage("raw-2", "first kept source"),
+			textCustomMessage("raw-3", "later source"),
+			observationsRecordedEntry("om-cross-boundary", {
+				observations: [observation("aaaaaaaaaaaa", { sourceEntryIds: ["raw-1"] })],
+				coversUpToId: "raw-3",
+			}),
+		];
+		const { run, debugRows } = setup({ entries, debugLog: true });
+
+		await expect(run("raw-2")).resolves.toBeUndefined();
+
+		expect(debugRows()).toEqual([
+			{
+				event: "compaction.hook_result",
+				data: {
+					reason: "host-owned",
+					authorityReason: "projection-incomplete",
+					tokensBefore: 123,
+					firstKeptEntryId: "raw-2",
+				},
+			},
+		]);
+	});
+
+	it("logs one duplicate-suppressed outcome with no other fields", async () => {
+		const entries = [textCustomMessage("raw-1", "aaaa")];
+		const { run, debugRows } = setup({ entries, compactHookInFlight: true, debugLog: true });
+
+		await expect(run("raw-1")).resolves.toEqual({ cancel: true });
+
+		expect(debugRows()).toEqual([{ event: "compaction.hook_result", data: { reason: "duplicate-suppressed" } }]);
+	});
+
+	it("keeps the debug context disabled without a debugLog config flag", async () => {
+		const entries = [textCustomMessage("raw-1", "aaaa")];
+		const { run, debugContexts } = setup({ entries });
+
+		await run("raw-1");
+
+		expect(debugContexts()).toEqual([{ enabled: false, cwd: "/tmp/project" }]);
 	});
 });
