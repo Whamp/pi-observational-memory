@@ -22,6 +22,28 @@ export function withDebugLogContext<T>(context: DebugLogContext, fn: () => T): T
 	return storage.run({ ...parent, ...context }, fn);
 }
 
+type DebugLogContextSource = {
+	cwd?: string;
+	sessionManager?: {
+		getSessionId?: () => string | undefined;
+		getSessionFile?: () => string | undefined;
+	};
+};
+
+/** Builds the debug log context for one run. Session metadata is optional because reading it can throw. */
+export function buildDebugLogContext(source: DebugLogContextSource, enabled: boolean): DebugLogContext {
+	try {
+		return {
+			enabled,
+			cwd: source.cwd,
+			sessionId: source.sessionManager?.getSessionId?.(),
+			sessionFile: source.sessionManager?.getSessionFile?.(),
+		};
+	} catch {
+		return { enabled, cwd: source.cwd };
+	}
+}
+
 export function safeDebugLogSessionId(sessionId: string | undefined): string | undefined {
 	const trimmed = sessionId?.trim();
 	if (!trimmed) return undefined;

@@ -6,7 +6,7 @@ import { observationPoolMetrics } from "../agents/dropper/pool.js";
 import { runObserver } from "../agents/observer/agent.js";
 import { runReflector } from "../agents/reflector/agent.js";
 import { createJevClient } from "../jev/client.js";
-import { debugLog, withDebugLogContext } from "../debug-log.js";
+import { buildDebugLogContext, debugLog, withDebugLogContext } from "../debug-log.js";
 import {
 	resolveJevDropperConfig,
 	resolveObserverChunkMaxTokens,
@@ -192,18 +192,6 @@ export function registerConsolidationTrigger(pi: ExtensionAPI, runtime: Runtime,
 	pi.on("turn_end", launch);
 }
 
-function debugSessionMetadata(ctx: ConsolidationCtx): { sessionId?: string; sessionFile?: string } {
-	try {
-		return {
-			sessionId: ctx.sessionManager.getSessionId?.(),
-			sessionFile: ctx.sessionManager.getSessionFile?.(),
-		};
-	} catch (error) {
-		debugLog("session.metadata_failed", { error: String(error) });
-		return {};
-	}
-}
-
 function maybeLaunchConsolidation(pi: ExtensionAPI, runtime: Runtime, ctx: ConsolidationCtx, deps: ConsolidationDeps): void {
 	runtime.ensureConfig(ctx.cwd);
 	if (runtime.config.passive === true) return;
@@ -223,11 +211,10 @@ function maybeLaunchConsolidation(pi: ExtensionAPI, runtime: Runtime, ctx: Conso
 		sessionManager: ctx.sessionManager,
 	};
 
-	const sessionMetadata = debugSessionMetadata(ctx);
+	// Read the scheduling session's metadata before the consolidation task runs.
+	const debugContext = buildDebugLogContext(ctx, runtime.config.debugLog === true);
 	void runtime.launchConsolidationTask(ctx, async () => withDebugLogContext({
-		enabled: runtime.config.debugLog === true,
-		cwd: ctx.cwd,
-		...sessionMetadata,
+		...debugContext,
 		runId,
 	}, async () => {
 		await runConsolidationPipeline(pi, runtime, consolidationCtx, deps);

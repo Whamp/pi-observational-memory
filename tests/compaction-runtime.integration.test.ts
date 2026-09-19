@@ -174,6 +174,10 @@ describe("real Pi Compaction Authority runtime", () => {
 			let compactions = compactionEntries(sessionManager);
 			expect(compactions).toHaveLength(1);
 			expect(compactions[0].fromHook).toBe(true);
+			// Pi stores the rendered summary verbatim, so this stored text is exactly what the model
+			// receives in place of the compacted entries.
+			expect(compactions[0].summary.length).toBe(983);
+			expect(Math.ceil(compactions[0].summary.length / 4)).toBe(246);
 			expect(compactions[0].summary).toContain(OM_MEMORY_SENTINEL);
 			expect(faux.state.callCount).toBe(2);
 
