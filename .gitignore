@@ -13,6 +13,8 @@ FEATURE_ROADMAP.md
 .codemapper
 openspec
 .pi
+.agents/
+.claude/
 v3_plan.md
 v3_spec.md
 .codegraph
