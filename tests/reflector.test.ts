@@ -81,6 +81,14 @@ describe("runReflector maxTokens clamping", () => {
 		expect(config().finishTurn({ message: { stopReason: "toolUse" } })).toBeUndefined();
 		expect(config().finishTurn({ message: { stopReason: "stop" } })).toEqual({ action: "end" });
 	});
+
+	it("forwards sessionId to the agent loop config", async () => {
+		const { loop, config } = captureLoopConfig();
+
+		await runReflector({ ...args, model: {} as any, sessionId: "session-abc", agentLoop: loop });
+
+		expect(config().sessionId).toBe("session-abc");
+	});
 });
 
 describe("V3 reflector agent", () => {
