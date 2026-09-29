@@ -84,22 +84,6 @@ describe("runDropper maxTokens clamping", () => {
 		expect(config().finishTurn({ message: { stopReason: "toolUse" } })).toBeUndefined();
 		expect(config().finishTurn({ message: { stopReason: "stop" } })).toEqual({ action: "end" });
 	});
-
-	it("forwards sessionId to the agent loop config", async () => {
-		const { loop, config } = captureLoopConfig();
-
-		await runDropper({ ...args, model: {} as any, sessionId: "session-abc", agentLoop: loop });
-
-		expect(config().sessionId).toBe("session-abc");
-	});
-
-	it("forwards cacheRetention to the agent loop config", async () => {
-		const { loop, config } = captureLoopConfig();
-
-		await runDropper({ ...args, model: {} as any, cacheRetention: "long", agentLoop: loop });
-
-		expect(config().cacheRetention).toBe("long");
-	});
 });
 
 describe("V3 dropper agent", () => {

@@ -74,22 +74,6 @@ describe("runObserver maxTokens clamping", () => {
 
 		expect(config().maxTokens).toBe(AGENT_LOOP_MAX_TOKENS);
 	});
-
-	it("forwards sessionId to the agent loop config", async () => {
-		const { loop, config } = captureLoopConfig();
-
-		await runObserver({ ...args, model: {} as any, sessionId: "session-abc", agentLoop: loop });
-
-		expect(config().sessionId).toBe("session-abc");
-	});
-
-	it("forwards cacheRetention to the agent loop config", async () => {
-		const { loop, config } = captureLoopConfig();
-
-		await runObserver({ ...args, model: {} as any, cacheRetention: "long", agentLoop: loop });
-
-		expect(config().cacheRetention).toBe("long");
-	});
 });
 
 describe("OBSERVATION_TIMESTAMP_PATTERN", () => {
@@ -137,36 +121,6 @@ describe("runObserver", () => {
 		expect(systemPrompt).not.toContain("pruner");
 	});
 
-	it("keeps prior memory before per-run time in the observer prompt", async () => {
-		let userText = "";
-		const priorReflection = "Reflection prefix value";
-		const priorObservation = "Observation prefix value";
-		const loop = fakeAgentLoop((prompts) => {
-			userText = prompts[0].content[0].text;
-		});
-
-		await runObserver({
-			...baseArgs,
-			priorReflections: [priorReflection],
-			priorObservations: [priorObservation],
-			agentLoop: loop,
-		});
-
-		const reflectionsIndex = userText.indexOf("CURRENT REFLECTIONS:");
-		const observationsIndex = userText.indexOf("CURRENT OBSERVATIONS:");
-		const timeIndex = userText.indexOf("Current local time:");
-		const chunkIndex = userText.indexOf("NEW CONVERSATION CHUNK:");
-		const prefixBeforeTime = userText.slice(0, timeIndex);
-		expect(reflectionsIndex).toBeGreaterThanOrEqual(0);
-		expect(reflectionsIndex).toBeLessThan(observationsIndex);
-		expect(observationsIndex).toBeLessThan(timeIndex);
-		expect(timeIndex).toBeLessThan(chunkIndex);
-		expect(prefixBeforeTime).toContain(priorReflection);
-		expect(prefixBeforeTime).toContain(priorObservation);
-		expect(userText).toContain("Use complete=false for partial batches or corrections, and use complete=true only on the final valid batch after the chunk is fully covered.");
-		expect(userText).toContain("If no observations are warranted, do not call the tool and reply with a short plain-text confirmation.");
-	});
-
 	it("records V3 observations with source ids and code-computed tokenCount", async () => {
 		const content = "User asked for a memory update.";
 		let toolResult: CapturedToolResult | undefined;
@@ -194,7 +148,7 @@ describe("runObserver", () => {
 
 	it("keeps an incomplete valid observation batch open", async () => {
 		let toolResult: CapturedToolResult | undefined;
-		const loop = fakeAgentLoop(async (_prompts, context) => {
+		const loop = fakeAgentLoop(async (...[, context]) => {
 			toolResult = await context.tools[0].execute("tool-1", {
 				observations: [{ timestamp: "2026-05-02 10:30", content: "Partial observation", relevance: "medium", sourceEntryIds: ["entry-a"] }],
 				complete: false,
@@ -240,7 +194,7 @@ describe("runObserver", () => {
 
 	it("keeps multi-batch observation coverage open until the final valid batch", async () => {
 		const toolResults: CapturedToolResult[] = [];
-		const loop = fakeAgentLoop(async (_prompts, context) => {
+		const loop = fakeAgentLoop(async (...[, context]) => {
 			toolResults.push(await context.tools[0].execute("tool-1", {
 				observations: [{ timestamp: "2026-05-02 10:30", content: "First observation", relevance: "medium", sourceEntryIds: ["entry-a"] }],
 				complete: false,

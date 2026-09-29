@@ -1,4 +1,3 @@
-import type { CacheRetention } from "@earendil-works/pi-ai";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockAgents = vi.hoisted(() => ({
@@ -52,7 +51,6 @@ function setup(args: {
 	consolidationInFlight?: boolean;
 	appendEntryReturnsId?: boolean;
 	sessionId?: string;
-	cacheRetention?: CacheRetention;
 }) {
 	let entries = [...args.entries];
 	let sessionId = args.sessionId ?? "session-1";
@@ -80,7 +78,6 @@ function setup(args: {
 			observationsPoolTargetTokens: args.observationsPoolTargetTokens ?? Math.floor((args.observationsPoolMaxTokens ?? 100) / 2),
 			agentMaxTurns: 9,
 			agentMaxTokens: 32000,
-			cacheRetention: args.cacheRetention,
 			model: { provider: "anthropic", id: "memory", thinking: "minimal" },
 		},
 		consolidationInFlight: args.consolidationInFlight ?? false,
@@ -231,22 +228,6 @@ describe("V3 consolidation trigger", () => {
 			thinkingLevel: "minimal",
 		}));
 		expect(pi.appendEntry).toHaveBeenCalledWith(OM_OBSERVATIONS_RECORDED, { observations: [obs], coversUpToId: "raw-1" });
-	});
-
-	it("forwards the scheduling session id and cache retention to every memory worker", async () => {
-		const newRef = reflection("ffffffffffff", ["aaaaaaaaaaaa"]);
-		mockAgents.runObserver.mockResolvedValueOnce([obsA]);
-		mockAgents.runReflector.mockResolvedValueOnce([newRef]);
-		mockAgents.runDropper.mockResolvedValueOnce(["aaaaaaaaaaaa"]);
-		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
-		const { fire, runLaunchedWork } = setup({ entries, sessionId: "session-abc", cacheRetention: "long", observationsPoolTargetTokens: 5 });
-
-		fire();
-		await runLaunchedWork();
-
-		expect(mockAgents.runObserver).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "session-abc", cacheRetention: "long" }));
-		expect(mockAgents.runReflector).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "session-abc", cacheRetention: "long" }));
-		expect(mockAgents.runDropper).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "session-abc", cacheRetention: "long" }));
 	});
 
 	it("forwards OAuth-shaped auth (headers, no apiKey) to the observer agent", async () => {

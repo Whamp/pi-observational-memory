@@ -1,5 +1,5 @@
 import { agentLoop, type AgentContext, type AgentLoopConfig, type AgentTool } from "@earendil-works/pi-agent-core";
-import type { CacheRetention, Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
+import type { Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { Type } from "@earendil-works/pi-ai";
 import type { Static } from "typebox";
 import { debugLog } from "../../debug-log.js";
@@ -33,8 +33,6 @@ interface RunReflectorArgs {
 	apiKey?: string;
 	headers?: Record<string, string>;
 	env?: Record<string, string>;
-	sessionId?: string;
-	cacheRetention?: CacheRetention;
 	reflections: Reflection[];
 	observations: Observation[];
 	signal?: AbortSignal;
@@ -203,8 +201,6 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
 		apiKey,
 		headers,
 		env,
-		sessionId: args.sessionId,
-		cacheRetention: args.cacheRetention,
 		maxTokens: boundedMaxTokens(model, args.maxOutputTokens ?? AGENT_LOOP_MAX_TOKENS),
 		convertToLlm: (msgs) => msgs as Message[],
 		toolExecution: "sequential",

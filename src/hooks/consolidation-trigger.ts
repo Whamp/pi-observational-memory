@@ -320,12 +320,11 @@ export async function runConsolidationPipeline(
 	runtime: Runtime,
 	ctx: ConsolidationCtx,
 ): Promise<void> {
-	const sessionId = debugSessionMetadata(ctx).sessionId;
 	const resolver = makeModelResolver(runtime, ctx);
 
 	runtime.consolidationPhase = "observer";
 	try {
-		const observerOutcome = await runObserverStage(pi, runtime, ctx, resolver, sessionId);
+		const observerOutcome = await runObserverStage(pi, runtime, ctx, resolver);
 		if (observerOutcome === "abort") return;
 	} catch (error) {
 		debugLog("observer.error", { errorMessage: runtime.recordConsolidationStageError(ctx, "observer", error) });
@@ -335,7 +334,7 @@ export async function runConsolidationPipeline(
 	runtime.consolidationPhase = "reflector";
 	let reflectorResult: ReflectorStageResult;
 	try {
-		reflectorResult = await runReflectorStage(pi, runtime, ctx, resolver, sessionId);
+		reflectorResult = await runReflectorStage(pi, runtime, ctx, resolver);
 		if (reflectorResult.outcome === "abort") return;
 	} catch (error) {
 		debugLog("reflector.error", { errorMessage: runtime.recordConsolidationStageError(ctx, "reflector", error) });
@@ -344,15 +343,7 @@ export async function runConsolidationPipeline(
 
 	runtime.consolidationPhase = "dropper";
 	try {
-		await runDropperStage(
-			pi,
-			runtime,
-			ctx,
-			resolver,
-			reflectorResult.sameRunReflections,
-			reflectorResult.effectiveReflectionCoverageId,
-			sessionId,
-		);
+		await runDropperStage(pi, runtime, ctx, resolver, reflectorResult.sameRunReflections, reflectorResult.effectiveReflectionCoverageId);
 	} catch (error) {
 		debugLog("dropper.error", { errorMessage: runtime.recordConsolidationStageError(ctx, "dropper", error) });
 	}
@@ -363,7 +354,6 @@ async function runObserverStage(
 	runtime: Runtime,
 	ctx: ConsolidationCtx,
 	resolver: ModelResolver,
-	sessionId: string | undefined,
 ): Promise<StageOutcome> {
 	const entries = ctx.sessionManager.getBranch() as Entry[];
 	const currentTokens = realContextTokens(ctx);
@@ -453,8 +443,6 @@ async function runObserverStage(
 			apiKey: worker.apiKey,
 			headers: worker.headers,
 			env: worker.env,
-			sessionId,
-			cacheRetention: runtime.config.cacheRetention,
 			priorReflections,
 			priorObservations,
 			chunk,
@@ -507,7 +495,6 @@ async function runReflectorStage(
 	runtime: Runtime,
 	ctx: ConsolidationCtx,
 	resolver: ModelResolver,
-	sessionId: string | undefined,
 ): Promise<ReflectorStageResult> {
 	const entries = ctx.sessionManager.getBranch() as Entry[];
 	const currentTokens = realContextTokens(ctx);
@@ -531,8 +518,6 @@ async function runReflectorStage(
 		apiKey: worker.apiKey,
 		headers: worker.headers,
 		env: worker.env,
-		sessionId,
-		cacheRetention: runtime.config.cacheRetention,
 		reflections: folded.reflections,
 		observations: folded.activeObservations,
 		maxTurns: runtime.config.agentMaxTurns,
@@ -559,7 +544,6 @@ async function runDropperStage(
 	resolver: ModelResolver,
 	sameRunReflections: Reflection[],
 	sameRunReflectionCoverageId: string | undefined,
-	sessionId: string | undefined,
 ): Promise<StageOutcome> {
 	if (!sameRunReflectionCoverageId || sameRunReflections.length === 0) {
 		debugLog("dropper.waiting_for_reflection", { sameRunReflections: sameRunReflections.length });
@@ -609,8 +593,6 @@ async function runDropperStage(
 		apiKey: worker.apiKey,
 		headers: worker.headers,
 		env: worker.env,
-		sessionId,
-		cacheRetention: runtime.config.cacheRetention,
 		reflections: reflectionsForDropper,
 		observations: folded.activeObservations,
 		targetTokens: runtime.config.observationsPoolTargetTokens,

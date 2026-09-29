@@ -1,5 +1,5 @@
 import { agentLoop, type AgentContext, type AgentLoopConfig, type AgentTool } from "@earendil-works/pi-agent-core";
-import type { CacheRetention, Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
+import type { Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { Type } from "@earendil-works/pi-ai";
 import type { Static } from "typebox";
 import { hashId } from "../../ids.js";
@@ -16,8 +16,6 @@ interface RunObserverArgs {
 	apiKey?: string;
 	headers?: Record<string, string>;
 	env?: Record<string, string>;
-	sessionId?: string;
-	cacheRetention?: CacheRetention;
 	priorReflections: string[];
 	priorObservations: string[];
 	chunk: string;
@@ -63,7 +61,7 @@ const RecordObservationsSchema = Type.Object({
 				},
 			),
 		}),
-		{ description: "Batch of new observations. May be empty only if the tool is not called at all." },
+		{ minItems: 1, description: "Nonempty batch of new observations. If nothing is new, do not call the tool." },
 	),
 	complete: Type.Boolean({
 		description: "Whether this batch completes chunk coverage. Set false when more observations or corrections remain.",
@@ -172,14 +170,13 @@ export async function runObserver(args: RunObserverArgs): Promise<Observation[] 
 	};
 
 	const now = nowTimestamp();
-	// Keep append-stable memory before per-run values so prefix caches can reuse it across observer runs.
-	const userText = `CURRENT REFLECTIONS:
+	const userText = `Current local time: ${now}
+
+CURRENT REFLECTIONS:
 ${joinOrEmpty(priorReflections)}
 
 CURRENT OBSERVATIONS:
 ${joinOrEmpty(priorObservations)}
-
-Current local time: ${now}
 
 Compress the following new conversation chunk into observations by calling record_observations one or more times. Use complete=false for partial batches or corrections, and use complete=true only on the final valid batch after the chunk is fully covered. If no observations are warranted, do not call the tool and reply with a short plain-text confirmation. Do not restate facts already present in current reflections or current observations. Prefer inline conversation timestamps when assigning times; fall back to the current local time above only if no message timestamp applies.
 
@@ -208,8 +205,6 @@ ${conversation}`;
 		apiKey,
 		headers,
 		env,
-		sessionId: args.sessionId,
-		cacheRetention: args.cacheRetention,
 		maxTokens: boundedMaxTokens(model, args.maxOutputTokens ?? AGENT_LOOP_MAX_TOKENS),
 		convertToLlm: (msgs) => msgs as Message[],
 		toolExecution: "sequential",

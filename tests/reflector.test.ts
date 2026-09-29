@@ -86,22 +86,6 @@ describe("runReflector maxTokens clamping", () => {
 		expect(config().finishTurn({ message: { stopReason: "toolUse" } })).toBeUndefined();
 		expect(config().finishTurn({ message: { stopReason: "stop" } })).toEqual({ action: "end" });
 	});
-
-	it("forwards sessionId to the agent loop config", async () => {
-		const { loop, config } = captureLoopConfig();
-
-		await runReflector({ ...args, model: {} as any, sessionId: "session-abc", agentLoop: loop });
-
-		expect(config().sessionId).toBe("session-abc");
-	});
-
-	it("forwards cacheRetention to the agent loop config", async () => {
-		const { loop, config } = captureLoopConfig();
-
-		await runReflector({ ...args, model: {} as any, cacheRetention: "long", agentLoop: loop });
-
-		expect(config().cacheRetention).toBe("long");
-	});
 });
 
 describe("V3 reflector agent", () => {
@@ -262,7 +246,7 @@ describe("V3 reflector agent", () => {
 	it("terminates after a complete valid reflection batch", async () => {
 		let toolResult: CapturedToolResult | undefined;
 		const content = "User prefers source-backed memory.";
-		const loop = fakeAgentLoop(async (_prompts, context) => {
+		const loop = fakeAgentLoop(async (...[, context]) => {
 			toolResult = await context.tools[0].execute("tool-1", {
 				reflections: [{ content, supportingObservationIds: ["aaaaaaaaaaaa"] }],
 				complete: true,
@@ -276,7 +260,7 @@ describe("V3 reflector agent", () => {
 
 	it("keeps an incomplete valid reflection batch open", async () => {
 		let toolResult: CapturedToolResult | undefined;
-		const loop = fakeAgentLoop(async (_prompts, context) => {
+		const loop = fakeAgentLoop(async (...[, context]) => {
 			toolResult = await context.tools[0].execute("tool-1", {
 				reflections: [{ content: "User prefers source-backed memory.", supportingObservationIds: ["aaaaaaaaaaaa"] }],
 				complete: false,
