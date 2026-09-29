@@ -11,14 +11,46 @@ import { estimateStringTokens } from "../src/tokens.js";
 import { AGENT_LOOP_MAX_TOKENS } from "../src/model-budget.js";
 import { observation, reflection } from "./fixtures/session.js";
 
-function fakeAgentLoop(handler: (prompts: any[], context: any, config: any) => Promise<void> | void): any {
-	return ((prompts: any[], context: any, config: any) => ({
-		async *[Symbol.asyncIterator]() {},
-		result: async () => {
-			await handler(prompts, context, config);
-			return {};
+function fakeAgentLoop(handler: (prompts: any[], context: any, config: any) => Promise<void> | void, events: any[] = []): any {
+	return (prompts: any[], context: any, config: any) => ({
+		async *[Symbol.asyncIterator]() {
+			const calls: Array<{ id: string; name: string; arguments: unknown; result: any }> = [];
+			const instrumentedContext = {
+				...context,
+				tools: context.tools.map((tool: any) => ({
+					...tool,
+					execute: async (id: string, toolArguments: unknown) => {
+						const result = await tool.execute(id, toolArguments);
+						calls.push({ id, name: tool.name, arguments: toolArguments, result });
+						return result;
+					},
+				})),
+			};
+			yield { type: "turn_start" };
+			await handler(prompts, instrumentedContext, config);
+			for (const call of calls) {
+				yield {
+					type: "tool_execution_end",
+					toolCallId: call.id,
+					toolName: call.name,
+					result: call.result,
+					isError: false,
+				};
+			}
+			yield {
+				type: "turn_end",
+				message: {
+					role: "assistant",
+					stopReason: calls.length > 0 ? "toolUse" : "stop",
+					content: calls.map((call) => ({ type: "toolCall", id: call.id, name: call.name, arguments: call.arguments })),
+				},
+				toolResults: calls.map((call) => call.result),
+			};
+			for (const event of events) yield event;
+			yield { type: "agent_end", messages: [] };
 		},
-	})) as any;
+		result: async () => ({}),
+	});
 }
 
 interface CapturedToolResult {
@@ -240,7 +272,10 @@ describe("V3 reflector agent", () => {
 
 		const result = await runReflector({ ...baseArgs, agentLoop: loop });
 
-		expect(result).toEqual([{ id: hashId(content), content, supportingObservationIds: ["aaaaaaaaaaaa", "bbbbbbbbbbbb"], tokenCount: estimateStringTokens(content) }]);
+		expect(result).toMatchObject({
+			kind: "completed",
+			records: [{ id: hashId(content), content, supportingObservationIds: ["aaaaaaaaaaaa", "bbbbbbbbbbbb"], tokenCount: estimateStringTokens(content) }],
+		});
 	});
 
 	it("terminates after a complete valid reflection batch", async () => {
@@ -284,7 +319,7 @@ describe("V3 reflector agent", () => {
 			});
 		});
 
-		await expect(runReflector({ ...baseArgs, agentLoop: loop })).resolves.toBeUndefined();
+		await expect(runReflector({ ...baseArgs, agentLoop: loop })).resolves.toEqual({ kind: "incomplete", records: [] });
 		expect(toolResult?.terminate).toBe(false);
 		expect(toolResult?.details).toMatchObject({ added: 0, rejected: 2 });
 	});
@@ -305,12 +340,12 @@ describe("V3 reflector agent", () => {
 
 		const result = await runReflector({ ...baseArgs, reflections: [existing], agentLoop: loop });
 
-		expect(result?.map((item) => item.content)).toEqual(["New durable fact."]);
+		expect(result).toMatchObject({ kind: "completed", records: [{ content: "New durable fact." }] });
 	});
 
-	it("returns undefined when no tool call records reflections", async () => {
+	it("returns an incomplete empty outcome when no tool call records reflections", async () => {
 		const loop = fakeAgentLoop(() => {});
-		await expect(runReflector({ ...baseArgs, agentLoop: loop })).resolves.toBeUndefined();
+		await expect(runReflector({ ...baseArgs, agentLoop: loop })).resolves.toEqual({ kind: "incomplete", records: [] });
 	});
 
 	it("throws on a failed stream with no accepted reflections", async () => {
@@ -329,14 +364,15 @@ describe("V3 reflector agent", () => {
 
 	it("keeps accepted reflections when a later stream turn fails", async () => {
 		const content = "User prefers source-backed memory.";
-		const loop = ((prompts: any[], context: any) => ({
-			async *[Symbol.asyncIterator]() {
-				yield { type: "message_end", message: { role: "assistant", stopReason: "toolUse" } };
-				await context.tools[0].execute("tool-1", { reflections: [{ content, supportingObservationIds: ["aaaaaaaaaaaa"] }] });
-				yield { type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: "rate limited" } };
-			},
-			result: async () => ({}),
-		})) as any;
-		await expect(runReflector({ ...baseArgs, agentLoop: loop })).resolves.toMatchObject([{ content }]);
+		const loop = fakeAgentLoop(async (_prompts, context) => {
+			await context.tools[0].execute("tool-1", {
+				reflections: [{ content, supportingObservationIds: ["aaaaaaaaaaaa"] }],
+				complete: true,
+			});
+		}, [{ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: "rate limited" } }]);
+		await expect(runReflector({ ...baseArgs, agentLoop: loop })).resolves.toMatchObject({
+			kind: "failed",
+			records: [{ content }],
+		});
 	});
 });

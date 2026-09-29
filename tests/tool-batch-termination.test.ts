@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 
 import { runObserver } from "../src/agents/observer/agent.js";
 import { runReflector } from "../src/agents/reflector/agent.js";
+import { hashId } from "../src/ids.js";
 import type { WorkerStreamSimple } from "../src/agents/worker-stream.js";
 import type { Observation } from "../src/session-ledger/index.js";
 
@@ -138,7 +139,21 @@ describe("recording tool termination through the real agent loop", () => {
 		const observations = await runObserver(observerArgs(provider.streamSimple));
 
 		expect(provider.requestCount()).toBe(1);
-		expect(observations?.map((item) => item.content)).toEqual(["First observation"]);
+		expect(observations).toMatchObject({ kind: "completed", records: [{ content: "First observation" }] });
+	});
+
+	it("certifies a complete recording call finalized on a stop turn", async () => {
+		const provider = providerStream([
+			{
+				content: [observationCall("observer-stop", observerBatch("Stop reason completion", true))],
+				stopReason: "stop",
+			},
+		]);
+
+		const outcome = await runObserver(observerArgs(provider.streamSimple));
+
+		expect(provider.requestCount()).toBe(1);
+		expect(outcome).toMatchObject({ kind: "completed", records: [{ content: "Stop reason completion" }] });
 	});
 
 	it("ends after one complete reflector batch and saves the follow-up request", async () => {
@@ -152,7 +167,21 @@ describe("recording tool termination through the real agent loop", () => {
 		const reflections = await runReflector(reflectorArgs(provider.streamSimple));
 
 		expect(provider.requestCount()).toBe(1);
-		expect(reflections?.map((item) => item.content)).toEqual(["A durable preference."]);
+		expect(reflections).toMatchObject({ kind: "completed", records: [{ content: "A durable preference." }] });
+	});
+
+	it("accepts an explicit empty complete observer batch as a nothing-new verdict", async () => {
+		const provider = providerStream([
+			{
+				content: [observationCall("observer-empty", { observations: [], complete: true })],
+				stopReason: "stop",
+			},
+		]);
+
+		const outcome = await runObserver(observerArgs(provider.streamSimple));
+
+		expect(provider.requestCount()).toBe(1);
+		expect(outcome).toEqual({ kind: "nothing-new" });
 	});
 
 	it("keeps partial observer batches open, then accumulates and dedupes the correction", async () => {
@@ -188,7 +217,10 @@ describe("recording tool termination through the real agent loop", () => {
 		const observations = await runObserver(observerArgs(provider.streamSimple));
 
 		expect(provider.requestCount()).toBe(2);
-		expect(observations?.map((item) => item.content)).toEqual(["First observation", "Corrected observation"]);
+		expect(observations).toMatchObject({
+			kind: "completed",
+			records: [{ content: "First observation" }, { content: "Corrected observation" }],
+		});
 	});
 
 	it("continues a mixed complete/incomplete tool-call batch", async () => {
@@ -206,7 +238,31 @@ describe("recording tool termination through the real agent loop", () => {
 		const observations = await runObserver(observerArgs(provider.streamSimple));
 
 		expect(provider.requestCount()).toBe(2);
-		expect(observations?.map((item) => item.content)).toEqual(["Complete batch item", "Incomplete batch item"]);
+		expect(observations).toMatchObject({
+			kind: "incomplete",
+			records: [{ content: "Complete batch item" }, { content: "Incomplete batch item" }],
+		});
+	});
+
+	it("does not certify mixed sibling calls when the incomplete call comes first", async () => {
+		const provider = providerStream([
+			{
+				content: [
+					observationCall("observer-incomplete", observerBatch("Incomplete sibling", false)),
+					observationCall("observer-complete", observerBatch("Complete sibling", true)),
+				],
+				stopReason: "toolUse",
+			},
+			finishTextTurn(),
+		]);
+
+		const outcome = await runObserver(observerArgs(provider.streamSimple));
+
+		expect(provider.requestCount()).toBe(2);
+		expect(outcome).toMatchObject({
+			kind: "incomplete",
+			records: [{ content: "Incomplete sibling" }, { content: "Complete sibling" }],
+		});
 	});
 
 	it("continues after rejecting one item in an otherwise valid observer batch", async () => {
@@ -239,7 +295,7 @@ describe("recording tool termination through the real agent loop", () => {
 		const observations = await runObserver(observerArgs(provider.streamSimple));
 
 		expect(provider.requestCount()).toBe(2);
-		expect(observations?.map((item) => item.content)).toEqual(["Accepted item"]);
+		expect(observations).toMatchObject({ kind: "incomplete", records: [{ content: "Accepted item" }] });
 	});
 
 	it("does not execute a schema-invalid observer call and asks the model again", async () => {
@@ -265,13 +321,13 @@ describe("recording tool termination through the real agent loop", () => {
 		const observations = await runObserver(observerArgs(provider.streamSimple));
 
 		expect(provider.requestCount()).toBe(2);
-		expect(observations).toBeUndefined();
+		expect(observations).toEqual({ kind: "incomplete", records: [] });
 	});
 
-	it("rejects an empty complete observer batch and accepts a corrected batch", async () => {
+	it("rejects an empty incomplete observer batch and accepts a corrected batch", async () => {
 		const provider = providerStream([
 			{
-				content: [observationCall("observer-1", { observations: [], complete: true })],
+				content: [observationCall("observer-1", { observations: [], complete: false })],
 				stopReason: "toolUse",
 			},
 			{
@@ -283,8 +339,49 @@ describe("recording tool termination through the real agent loop", () => {
 		const observations = await runObserver(observerArgs(provider.streamSimple));
 
 		expect(provider.requestCount()).toBe(2);
-		expect(observations?.map((item) => item.content)).toEqual(["Corrected nonempty batch"]);
+		expect(observations).toMatchObject({ kind: "completed", records: [{ content: "Corrected nonempty batch" }] });
 	});
+
+	it("certifies a complete observer batch at the turn cap", async () => {
+		const provider = providerStream([
+			{
+				content: [observationCall("observer-capped-complete", observerBatch("Complete at turn cap", true))],
+				stopReason: "toolUse",
+			},
+		]);
+
+		const outcome = await runObserver({ ...observerArgs(provider.streamSimple), maxTurns: 1 });
+
+		expect(provider.requestCount()).toBe(1);
+		expect(outcome).toMatchObject({ kind: "completed", records: [{ content: "Complete at turn cap" }] });
+	});
+
+	it.each([
+		["both complete", true, true, "completed"],
+		["first incomplete", false, true, "incomplete"],
+		["last incomplete", true, false, "incomplete"],
+	] as const)(
+		"certifies a capped tool batch only when every sibling completes: %s",
+		async (...[, firstComplete, secondComplete, expectedKind]) => {
+			const provider = providerStream([
+				{
+					content: [
+						observationCall("capped-first", observerBatch("First capped observation", firstComplete)),
+						observationCall("capped-second", observerBatch("Second capped observation", secondComplete)),
+					],
+					stopReason: "toolUse",
+				},
+			]);
+
+			const outcome = await runObserver({ ...observerArgs(provider.streamSimple), maxTurns: 1 });
+
+			expect(provider.requestCount()).toBe(1);
+			expect(outcome).toMatchObject({
+				kind: expectedKind,
+				records: [{ content: "First capped observation" }, { content: "Second capped observation" }],
+			});
+		},
+	);
 
 	it("characterizes the partial observer result returned at the turn cap", async () => {
 		const provider = providerStream([
@@ -297,7 +394,49 @@ describe("recording tool termination through the real agent loop", () => {
 		const observations = await runObserver({ ...observerArgs(provider.streamSimple), maxTurns: 1 });
 
 		expect(provider.requestCount()).toBe(1);
-		expect(observations?.map((item) => item.content)).toEqual(["Partial at turn cap"]);
+		expect(observations).toEqual({
+			kind: "incomplete",
+			records: [expect.objectContaining({ content: "Partial at turn cap" })],
+		});
+	});
+
+	it("accepts an explicit empty complete reflector batch as a nothing-new verdict", async () => {
+		const provider = providerStream([
+			{
+				content: [reflectionCall("reflector-empty", { reflections: [], complete: true })],
+				stopReason: "stop",
+			},
+		]);
+
+		const outcome = await runReflector(reflectorArgs(provider.streamSimple));
+
+		expect(provider.requestCount()).toBe(1);
+		expect(outcome).toEqual({ kind: "nothing-new" });
+	});
+
+	it("treats a duplicate-only complete reflection review as nothing-new", async () => {
+		const content = "A durable preference.";
+		const provider = providerStream([
+			{
+				content: [reflectionCall("reflector-duplicate", reflectionBatch(content, true))],
+				stopReason: "toolUse",
+			},
+		]);
+
+		const outcome = await runReflector({
+			...reflectorArgs(provider.streamSimple),
+			reflections: [
+				{
+					id: hashId(content),
+					content,
+					supportingObservationIds: [SUPPORTING_OBSERVATION.id],
+					tokenCount: 5,
+				},
+			],
+		});
+
+		expect(provider.requestCount()).toBe(1);
+		expect(outcome).toEqual({ kind: "nothing-new" });
 	});
 
 	it("keeps an incomplete reflector batch open before completing the review", async () => {
@@ -315,7 +454,10 @@ describe("recording tool termination through the real agent loop", () => {
 		const reflections = await runReflector(reflectorArgs(provider.streamSimple));
 
 		expect(provider.requestCount()).toBe(2);
-		expect(reflections?.map((item) => item.content)).toEqual(["First reflection", "Final reflection"]);
+		expect(reflections).toMatchObject({
+			kind: "completed",
+			records: [{ content: "First reflection" }, { content: "Final reflection" }],
+		});
 	});
 
 	it("continues after rejecting reflection support in an otherwise valid batch", async () => {
@@ -338,6 +480,6 @@ describe("recording tool termination through the real agent loop", () => {
 		const reflections = await runReflector(reflectorArgs(provider.streamSimple));
 
 		expect(provider.requestCount()).toBe(2);
-		expect(reflections?.map((item) => item.content)).toEqual(["Accepted reflection"]);
+		expect(reflections).toMatchObject({ kind: "incomplete", records: [{ content: "Accepted reflection" }] });
 	});
 });

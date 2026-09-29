@@ -87,9 +87,9 @@ Invalid values are ignored. Positive-integer settings must be finite integers gr
 
 Default: `10000`.
 
-The observer runs from Pi's `turn_end` hook. It counts raw/source tokens after the latest `om.observations.recorded.data.coversUpToId` marker. When the count reaches `observeAfterTokens`, the observer receives source entries after that marker and may append a non-empty `om.observations.recorded` ledger entry.
+The observer checks work from Pi's `agent_start` and `turn_end` hooks. It counts raw/source tokens after the latest completed `om.observations.recorded.data.coversUpToId` marker. When the count reaches `observeAfterTokens`, the observer receives source entries after that marker.
 
-Lower values create smaller chunks and more frequent model calls. Higher values reduce model-call frequency but let unobserved raw conversation accumulate longer. If the observer deliberately emits no observations, no ledger entry is written; the same range remains uncovered, and the observer retries after another `observeAfterTokens` of source tokens accumulate.
+A completed review appends a `completion: "completed"` entry with `coversUpToId`; an explicit empty completed batch records a no-new verdict and advances coverage. Accepted partial records use `completion: "incomplete"` with `inputUpToId`, which does not advance the token clock. Missing tool completion or plain text leaves the range eligible for later retry. There is no empty-result backoff: unfinished work retries when its token threshold is due. Lower values create smaller chunks and more frequent model calls; higher values reduce call frequency but let unobserved raw conversation accumulate longer.
 
 ## `observerChunkMaxTokens`
 
@@ -105,7 +105,7 @@ Default: `20000`.
 
 The reflector uses this raw/source-token threshold. Reflector progress is counted after the latest `om.reflections.recorded.data.coversUpToId` marker.
 
-The dropper no longer uses `reflectAfterTokens` as its own launch threshold. Dropper work is gated by successful reflection: after the reflector records non-empty reflections in a consolidation pass, the dropper may run if the folded active observation ledger is over `observationsPoolTargetTokens`. It can see same-turn new reflections before deciding what to prune.
+The dropper no longer uses `reflectAfterTokens` as its own launch threshold. The reflector sees active observations whose first-valid record input boundary is at or before completed observer coverage. Dropper work is gated by a completed same-pass reflection review that adds non-empty reflections; it receives that reviewed observation snapshot intersected with current active observations, plus same-turn reflections.
 
 Lower values distill reflections more often and therefore create more opportunities for post-reflection dropper maintenance. Higher values reduce reflector model calls but leave more observations between reflection and dropper opportunities.
 
@@ -123,7 +123,7 @@ Pi's own window-pressure compaction and manual compaction can still happen indep
 
 Default: `20000`.
 
-This controls V3's full-fold pressure. During compaction, the extension builds the normal compaction projection: observations whose `coversUpToId` reaches the compaction boundary, with reflection/drop effects held stable from the latest full fold. If there is no previous full fold, normal compaction includes observations only. If that projection's active observation tokens are at or above `observationsPoolMaxTokens`, compaction performs a full fold through the compaction boundary and applies observations, reflections, and drops by coverage marker. Otherwise, it keeps reflection/drop effects stable from the latest full fold and projects only observations through the new boundary.
+This controls V3's full-fold pressure. During compaction, the extension builds the normal compaction projection: observations whose completed/legacy `coversUpToId` or incomplete `inputUpToId` reaches the compaction boundary, with reflection/drop effects held stable from the latest full fold. If there is no previous full fold, normal compaction includes observations only. If that projection's active observation tokens are at or above `observationsPoolMaxTokens`, compaction performs a full fold through the compaction boundary and applies observations, reflections, and drops by coverage marker. Otherwise, it keeps reflection/drop effects stable from the latest full fold and projects only observations through the new boundary.
 
 This is not the active observation dropper target and not a scheduling threshold for the reflector. Use `observationsPoolTargetTokens` for dropper active observation maintenance and `reflectAfterTokens` for reflector cadence.
 
@@ -131,7 +131,7 @@ This is not the active observation dropper target and not a scheduling threshold
 
 Default: half of `observationsPoolMaxTokens`.
 
-This controls the folded active observation target used by the dropper. If folded active observation tokens are at or below this target, the dropper has no maintenance work. If they are over target, the dropper can run only after the reflector records non-empty reflections in the same consolidation pass.
+This controls the reviewed active observation target used by the dropper. If the completed reflection snapshot is at or below this target, the dropper has no maintenance work. If it is over target, the dropper can run only after the reflector completes a review that adds non-empty reflections in the same consolidation pass.
 
 With the defaults, `observationsPoolMaxTokens` is `20000` and `observationsPoolTargetTokens` is `10000`. If the active observation pool reaches about `20000` tokens, the dropper computes a maximum count intended to move it back toward about `10000` tokens, but the model may drop fewer or none.
 
@@ -217,7 +217,7 @@ If the fallback advertises a smaller context window than the primary, the observ
 
 Default: `true`.
 
-When `false`, the extension hides routine observer, reflector, and dropper progress notifications (including deliberate-empty observer info messages). Model fallback/unavailability, worker failures (including observer stream errors), compaction notifications, and explicit `/om:*` command output remain visible.
+When `false`, the extension hides routine observer, reflector, and dropper progress notifications (including no-new observer completion messages). Model fallback/unavailability, worker failures (including observer stream errors), compaction notifications, and explicit `/om:*` command output remain visible.
 
 ## `passive`
 
