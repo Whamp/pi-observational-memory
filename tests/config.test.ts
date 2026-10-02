@@ -45,9 +45,12 @@ describe("V3 config", () => {
 			observationsPoolTargetTokens: 10000,
 			agentMaxTurns: 16,
 			agentMaxTokens: 32000,
+			compactionCatchUpMaxChunks: 2,
+			consolidateWhenIdle: false,
 			showWorkerNotifications: true,
 			passive: false,
 			debugLog: false,
+			piAutoCompactionEnabled: true,
 		});
 		expect(loadConfig(cwd, {})).toEqual(DEFAULTS);
 	});
@@ -301,5 +304,12 @@ describe("V3 config", () => {
 			expect(resolveCompactAfterTokens(config, 0)).toBe(81000);
 			expect(resolveCompactAfterTokens(config, -1)).toBe(81000);
 		});
+	});
+	it("reads Pi's compaction.enabled, project over global", () => {
+		writeJson(join(agentDir, "settings.json"), { compaction: { enabled: false } });
+		expect(loadConfig(cwd, {}).piAutoCompactionEnabled).toBe(false);
+
+		writeJson(join(cwd, ".pi", "settings.json"), { compaction: { enabled: true } });
+		expect(loadConfig(cwd, {}).piAutoCompactionEnabled).toBe(true);
 	});
 });
