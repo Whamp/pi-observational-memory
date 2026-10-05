@@ -187,7 +187,13 @@ pi install git:github.com/elpapi42/pi-observational-memory
 pi install /absolute/path/to/pi-observational-memory
 ```
 
-Pi loads the extension from `src/index.ts` through the package `pi.extensions` entry.
+Pi loads the extension from the prebuilt `dist/index.ts` module that the package `pi.extensions` entry points at.
+
+---
+
+## Development
+
+`src/` is the source of truth. To regenerate the prebuilt module after editing `src/`, run `npm run build`. CI fails when `dist/` is stale.
 
 ---
 
